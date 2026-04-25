@@ -1,0 +1,358 @@
+import SwiftUI
+import SwiftData
+import LaTeXSwiftUI
+import Combine
+
+struct HomeView: View {
+
+    @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var settingsStore: SettingsStore
+
+    @State private var selectedURL: IdentifiableURL?
+    @State private var expandedPaperID: Paper.ID?
+
+    @State private var activeFilter: PaperFilter = .new
+
+    @State private var hasFetchedToday = false
+    private let lastFetchKey = "lastArxivFetchDate"
+    @State private var refreshMessage: String = ""
+    @State private var showRefreshMessage = false
+
+    enum PaperFilter: String, CaseIterable {
+        case new = "New"
+        case crossList = "Cross-lists"
+        case updates = "Updates"
+    }
+
+    private var todayRange: (start: Date, end: Date) {
+        let start = Calendar.current.startOfDay(for: Date())
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start
+        return (start, end)
+    }
+
+    private func todaysPapers() -> [Paper] {
+        let start = todayRange.start
+        let end = todayRange.end
+
+        let descriptor = FetchDescriptor<Paper>(
+            predicate: #Predicate<Paper> { paper in
+                paper.date >= start && paper.date < end
+            },
+            sortBy: [SortDescriptor(\Paper.date, order: .reverse)]
+        )
+
+        return (try? modelContext.fetch(descriptor)) ?? []
+    }
+
+    private var papers: [Paper] { todaysPapers() }
+
+    private var filteredPapers: [Paper] {
+        let base: [Paper]
+        switch activeFilter {
+        case .new:
+            base = papers.filter { !$0.isUpdate && !$0.isCrosslist }
+        case .crossList:
+            base = papers.filter { !$0.isUpdate && $0.isCrosslist }
+        case .updates:
+            base = papers.filter { $0.isUpdate }
+        }
+
+        let keywords = settingsStore.keywords
+        guard !keywords.isEmpty else { return base }
+
+        let scored: [(paper: Paper, score: Double)] = base.map { paper in
+            (paper, KeywordScorer.score(paper: paper, keywords: keywords))
+        }
+
+        return scored
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                return lhs.paper.date > rhs.paper.date
+            }
+            .map(\.paper)
+    }
+    
+
+    private var counts: (new: Int, crossList: Int, updates: Int) {
+        (
+            new: papers.filter { !$0.isUpdate && !$0.isCrosslist }.count,
+            crossList: papers.filter { !$0.isUpdate && $0.isCrosslist }.count,
+            updates: papers.filter { $0.isUpdate }.count
+        )
+    }
+
+    private var activeCount: Int {
+        switch activeFilter {
+        case .new: return counts.new
+        case .crossList: return counts.crossList
+        case .updates: return counts.updates
+        }
+    }
+    
+    
+    private func refreshDailyPapers() async {
+        let categories = settingsStore.selectedCategories
+        guard !categories.isEmpty else { return }
+        let manager = NetworkManager(context: modelContext)
+        await manager.syncPapers(for: categories)
+    }
+    
+    
+
+    var body: some View {
+        PaperScaffold(
+            background: {
+                LinearGradient(
+                    colors: [KiwiColors.creamWhite, KiwiColors.creamWhite.opacity(0.92)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            },
+            header: {
+                KiwiAppNavBar {
+                    Text("Today's papers")
+                        .font(.custom("Pulang", size: 22))
+                        .foregroundColor(KiwiColors.darkBrown)
+                }
+            },
+            items: filteredPapers,
+            row: { paper in
+                paperRow(paper)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        let isExpanded = (expandedPaperID == paper.id)
+                        expandedPaperID = isExpanded ? nil : paper.id
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button {
+                            paper.saved.toggle()
+                            UINotificationFeedbackGenerator()
+                                .notificationOccurred(paper.saved ? .success : .warning)
+                        } label: {
+                            Label(paper.saved ? "Remove" : "Save",
+                                  systemImage: paper.saved ? "checkmark" : "plus")
+                        }
+                        .tint(paper.saved ? .gray : .green)
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        Button {
+                            selectedURL = IdentifiableURL(url: paper.url)
+                        } label: {
+                            Label("arXiv", systemImage: "safari")
+                        }
+                        .tint(.blue)
+                    }
+            },
+            emptyState: { emptyState },
+            bottomOverlay: {
+                filterBar
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+                    .safeAreaPadding(.bottom) // keeps it above home indicator
+            }
+        )
+        .task { await autoFetchIfNeeded() }
+        .sheet(item: $selectedURL) { wrapper in
+            SafariView(url: wrapper.url)
+        }
+        .navigationBarBackButtonHidden(true)
+        .overlay(alignment: .bottom) {
+            if showRefreshMessage {
+                Text(refreshMessage)
+                    .font(.custom("ArialRoundedMTBold", size: 14))
+                    .foregroundColor(KiwiColors.darkBrown)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(KiwiColors.creamWhite.opacity(0.85))
+                    )
+                    .padding(.bottom, 14)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    // MARK: - Bottom filter bar (material + transparent)
+    private var filterBar: some View {
+        HStack {
+            HStack(spacing: 10) {
+                filterButton(.new)
+                filterButton(.crossList)
+                filterButton(.updates)
+            }
+
+            Spacer()
+
+            Text("\(activeCount) papers")
+                .font(.custom("Pulang", size: 14))
+                .foregroundColor(KiwiColors.darkBrown)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .glassEffect(
+            .clear,
+            in: .rect(cornerRadius: 16)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture { }
+    }
+
+    private func filterButton(_ filter: PaperFilter) -> some View {
+        Button { activeFilter = filter } label: {
+            Text(letter(for: filter))
+                .font(.custom("Pulang", size: 16))
+                .frame(width: 32, height: 28)
+                .foregroundColor(activeFilter == filter ? KiwiColors.creamWhite : KiwiColors.darkBrown)
+                .background(activeFilter == filter ? KiwiColors.darkGreen : Color.clear)
+                .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Row
+    private func paperRow(_ paper: Paper) -> some View {
+        let isExpanded = (expandedPaperID == paper.id)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top) {
+                    LaTeX(paper.title)
+                        .font(.subheadline)
+                        .foregroundColor(KiwiColors.darkBrown)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .parsingMode(.onlyEquations)
+                        .allowsHitTesting(false)
+
+                    Spacer()
+
+                    if paper.isUpdate { badge("U", color: .blue) }
+                    if paper.isCrosslist { badge("C", color: .orange) }
+                }
+
+                HStack(spacing: 4) {
+                    let allCats = [paper.primaryCategory] + paper.categories.filter { $0 != paper.primaryCategory }
+                    ForEach(Array(allCats.enumerated()), id: \.element) { index, cat in
+                        Text(cat.lowercased())
+                            .font(.caption2)
+                            .foregroundColor(KiwiColors.creamWhite)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(index == 0 ? KiwiColors.darkGreen : KiwiColors.darkBrown)
+                            .cornerRadius(4)
+                    }
+                }
+
+                HStack(alignment: .firstTextBaseline) {
+                    Text(paper.authors.truncatedAuthors())
+                        .font(.caption)
+                        .foregroundColor(KiwiColors.darkBrown)
+
+                    Spacer()
+
+                    if paper.saved {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(KiwiColors.darkGreen)
+                            .accessibilityLabel("Saved")
+                    }
+                }
+            }
+
+            if isExpanded {
+                Divider().background(KiwiColors.darkBrown.opacity(0.25))
+
+                LaTeX(paper.abstract)
+                    .font(.caption2)
+                    .foregroundColor(KiwiColors.creamWhite)
+                    .parsingMode(.onlyEquations)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(KiwiColors.darkGreen)
+                    )
+                    .allowsHitTesting(false)
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func letter(for filter: PaperFilter) -> String {
+        switch filter {
+        case .new: return "N"
+        case .crossList: return "C"
+        case .updates: return "U"
+        }
+    }
+
+    private func badge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.custom("Pulang", size: 15))
+            .bold()
+            .foregroundColor(color)
+    }
+
+    private var emptyState: some View {
+        ScrollView {
+            VStack(spacing: 10) {
+                Spacer(minLength: 140)
+
+                Text("No papers for today yet")
+                    .font(.custom("ArialRoundedMTBold", size: 20))
+                    .foregroundColor(KiwiColors.darkBrown)
+
+                Spacer(minLength: 400) // <- ensures there's enough scroll room to pull
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal)
+        }
+        .scrollIndicators(.hidden)
+        .refreshable {
+            await fetchLatestPapers()
+        }
+    }
+
+    // MARK: - Fetch logic
+    private func autoFetchIfNeeded() async {
+        guard !hasFetchedToday else { return }
+
+        let today = Calendar.current.startOfDay(for: Date())
+        let lastFetch = UserDefaults.standard.object(forKey: lastFetchKey) as? Date
+
+        if lastFetch == nil || Calendar.current.startOfDay(for: lastFetch!) < today {
+            await fetchLatestPapers()
+            UserDefaults.standard.set(Date(), forKey: lastFetchKey)
+        }
+
+        hasFetchedToday = true
+    }
+
+    private func fetchLatestPapers() async {
+        let categories = settingsStore.selectedCategories
+        guard !categories.isEmpty else {
+            refreshMessage = "Choose categories in Settings"
+            withAnimation { showRefreshMessage = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                withAnimation { showRefreshMessage = false }
+            }
+            return
+        }
+
+        let manager = NetworkManager(context: modelContext)
+
+        let beforeCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
+        await manager.syncPapers(for: categories)
+        let afterCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
+
+        let delta = max(afterCount - beforeCount, 0)
+        refreshMessage = delta > 0 ? "Added \(delta) papers!" : "No new papers to add"
+
+        withAnimation { showRefreshMessage = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation { showRefreshMessage = false }
+        }
+    }
+}
