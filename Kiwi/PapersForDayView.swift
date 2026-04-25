@@ -19,34 +19,18 @@ struct IdentifiableURL: Identifiable {
     let url: URL
 }
 
-// MARK: - Helper extension for authors
-//extension Array where Element == String {
-//    func truncatedAuthors(maxAuthors: Int = 4) -> String {
-//        guard !isEmpty else { return "" }
-//        
-//        if count <= maxAuthors {
-//            return map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-//                .joined(separator: ", ")
-//        } else {
-//            return prefix(maxAuthors)
-//                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-//                .joined(separator: ", ") + ", et al"
-//        }
-//    }
-//}
-
 extension Array where Element == String {
     func truncatedAuthors(maxAuthors: Int = 4) -> String {
         guard !isEmpty else { return "" }
 
         func normalizeAuthor(_ s: String) -> String {
-            // 1) Turn spacing accents into combining marks so NFC can compose them.
-            // Common offenders: U+00B4 (´), U+0060 (`), U+005E (^), U+007E (~)
+            // Convert spacing-accent characters to combining marks so NFC
+            // composes them onto the previous letter (á, ñ, ç …).
             let combiningMap: [Character: Character] = [
-                "\u{00B4}": "\u{0301}", // ´ ->  ́  (combining acute)
-                "\u{0060}": "\u{0300}", // ` ->  ̀  (combining grave)
-                "\u{005E}": "\u{0302}", // ^ ->  ̂  (combining circumflex)
-                "\u{007E}": "\u{0303}"  // ~ ->  ̃  (combining tilde)
+                "\u{00B4}": "\u{0301}", // ´ -> combining acute
+                "\u{0060}": "\u{0300}", // ` -> combining grave
+                "\u{005E}": "\u{0302}", // ^ -> combining circumflex
+                "\u{007E}": "\u{0303}"  // ~ -> combining tilde
             ]
 
             var out: [Character] = []
@@ -54,29 +38,23 @@ extension Array where Element == String {
 
             for ch in s {
                 if let combining = combiningMap[ch], !out.isEmpty {
-                    // attach the accent to the previous character
                     out.append(combining)
                 } else {
                     out.append(ch)
                 }
             }
 
-            let rebuilt = String(out)
-                .replacingOccurrences(of: "\u{00A0}", with: " ") // NBSP -> space
-
-            // 2) Compose to precomposed characters (á, ñ, ç, …)
-            return rebuilt
+            return String(out)
+                .replacingOccurrences(of: "\u{00A0}", with: " ")
                 .precomposedStringWithCanonicalMapping
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         let cleaned = self.map(normalizeAuthor)
-
         if cleaned.count <= maxAuthors {
             return cleaned.joined(separator: ", ")
-        } else {
-            return cleaned.prefix(maxAuthors).joined(separator: ", ") + ", et al"
         }
+        return cleaned.prefix(maxAuthors).joined(separator: ", ") + ", et al"
     }
 }
 

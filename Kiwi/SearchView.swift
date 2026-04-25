@@ -41,9 +41,8 @@ struct SearchView: View {
     }
 
     @MainActor private var items: [PaperRowItem] {
-        resultIDs.compactMap { id in
-            papers.first(where: { $0.id == id }).map(PaperRowItem.init)
-        }
+        let byID = Dictionary(uniqueKeysWithValues: papers.map { ($0.id, $0) })
+        return resultIDs.compactMap { byID[$0].map(PaperRowItem.init) }
     }
 
     var body: some View {

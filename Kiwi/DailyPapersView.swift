@@ -8,15 +8,25 @@ struct DailyPapersView: View {
     @Query(sort: \Paper.date, order: .reverse)
     private var papers: [Paper]
 
-    // MARK: - Group papers by day
-    private var days: [(day: Date, papers: [Paper])] {
+    private static let dayCalendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = .current
+        return cal
+    }()
 
+    // MARK: - Group papers by day
+    private var days: [(day: Date, papers: [Paper])] {
+        let cal = Self.dayCalendar
         let grouped = Dictionary(grouping: papers) { cal.startOfDay(for: $0.date) }
         return grouped
             .map { (day: $0.key, papers: $0.value) }
             .sorted { $0.day > $1.day }
+    }
+
+    // Normalized once per render; rows do an O(1) lookup.
+    private var clickedDaySet: Set<Date> {
+        let cal = Self.dayCalendar
+        return Set(settingsStore.clickedDays.map(cal.startOfDay))
     }
 
     private func refreshDailyPapers() async {
@@ -63,7 +73,8 @@ struct DailyPapersView: View {
                                 } label: {
                                     DayShelfRow(
                                         day: entry.day,
-                                        paperCount: entry.papers.count
+                                        paperCount: entry.papers.count,
+                                        clicked: clickedDaySet.contains(entry.day)
                                     )
                                 }
                                 .buttonStyle(.plain)
@@ -88,21 +99,9 @@ struct DailyPapersView: View {
 // MARK: - Shelf Row
 
 private struct DayShelfRow: View {
-    @EnvironmentObject private var settingsStore: SettingsStore
-
     let day: Date
     let paperCount: Int
-
-    private var clicked: Bool {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = .current
-        let d = cal.startOfDay(for: day)
-
-        // Normalize stored days the same way
-        return settingsStore.clickedDays.contains(where: {
-            cal.startOfDay(for: $0) == d
-        })
-    }
+    let clicked: Bool
 
     private var booksCount: Int { Self.booksForCount(paperCount, maxBooks: 16) }
 
@@ -135,10 +134,6 @@ private struct DayShelfRow: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(KiwiColors.creamWhite.opacity(0.70))
         )
-//        .overlay(
-//            RoundedRectangle(cornerRadius: 18, style: .continuous)
-//                .stroke(KiwiColors.darkBrown.opacity(0.10), lineWidth: 1)
-//        )
     }
 
     private var shelfView: some View {

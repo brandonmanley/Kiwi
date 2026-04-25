@@ -76,13 +76,22 @@ final class NetworkManager: NSObject, XMLParserDelegate {
             do {
                 let (data, _) = try await URLSession.shared.data(from: url)
 
+                let urlsBefore = Set(fetchedPapers.keys)
+
                 let parser = XMLParser(data: data)
                 parser.delegate = self
                 parser.parse()
 
-                // Stop early once we start seeing papers older than lookback window.
-                let batchOldest = fetchedPapers.values.compactMap { $0.updatedDate }.min() ?? Date()
-                if batchOldest < cutoff { break }
+                // Stop early once *this batch* has any paper older than the lookback window.
+                // arXiv returns results sorted by date descending, so an old paper means
+                // remaining batches will be older still.
+                let batchDates = fetchedPapers
+                    .filter { !urlsBefore.contains($0.key) }
+                    .values
+                    .compactMap { $0.updatedDate }
+
+                if batchDates.isEmpty { break } // empty page → end of results
+                if let oldest = batchDates.min(), oldest < cutoff { break }
 
             } catch {
                 #if DEBUG
