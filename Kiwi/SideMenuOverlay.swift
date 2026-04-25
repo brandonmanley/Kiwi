@@ -55,23 +55,14 @@ struct SideMenuOverlay: View {
                 Spacer()
                 
                 Button {
-                    // --- Haptic (once)
                     let generator = UIImpactFeedbackGenerator(style: .light)
                     generator.prepare()
                     generator.impactOccurred(intensity: 0.8)
-
-                    // --- Wiggle sequence (rotation only)
-                    withAnimation(.easeInOut(duration: 0.09)) {
-                        kiwiWiggle = -14
-                    }
-
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.09) {
-                        withAnimation(.easeInOut(duration: 0.09)) {
-                            kiwiWiggle = 14
-                        }
-                    }
-
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    Task { @MainActor in
+                        withAnimation(.easeInOut(duration: 0.09)) { kiwiWiggle = -14 }
+                        try? await Task.sleep(nanoseconds: 90_000_000)
+                        withAnimation(.easeInOut(duration: 0.09)) { kiwiWiggle = 14 }
+                        try? await Task.sleep(nanoseconds: 90_000_000)
                         withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.55)) {
                             kiwiWiggle = 0
                         }

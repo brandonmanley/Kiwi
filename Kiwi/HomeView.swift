@@ -17,6 +17,7 @@ struct HomeView: View {
     private let lastFetchKey = "lastArxivFetchDate"
     @State private var refreshMessage: String = ""
     @State private var showRefreshMessage = false
+    @State private var refreshMessageTask: Task<Void, Never>?
 
     enum PaperFilter: String, CaseIterable {
         case new = "New"
@@ -24,27 +25,18 @@ struct HomeView: View {
         case updates = "Updates"
     }
 
-    private var todayRange: (start: Date, end: Date) {
+    // Reactive query: today's papers, sorted by date desc.
+    // Re-evaluates automatically when SwiftData changes (saves, sync, etc.).
+    @Query private var papers: [Paper]
+
+    init() {
         let start = Calendar.current.startOfDay(for: Date())
         let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start
-        return (start, end)
-    }
-
-    private func todaysPapers() -> [Paper] {
-        let start = todayRange.start
-        let end = todayRange.end
-
-        let descriptor = FetchDescriptor<Paper>(
-            predicate: #Predicate<Paper> { paper in
-                paper.date >= start && paper.date < end
-            },
-            sortBy: [SortDescriptor(\Paper.date, order: .reverse)]
+        _papers = Query(
+            filter: #Predicate<Paper> { $0.date >= start && $0.date < end },
+            sort: [SortDescriptor(\Paper.date, order: .reverse)]
         )
-
-        return (try? modelContext.fetch(descriptor)) ?? []
     }
-
-    private var papers: [Paper] { todaysPapers() }
 
     private var filteredPapers: [Paper] {
         let base: [Paper]
@@ -90,15 +82,6 @@ struct HomeView: View {
     }
     
     
-    private func refreshDailyPapers() async {
-        let categories = settingsStore.selectedCategories
-        guard !categories.isEmpty else { return }
-        let manager = NetworkManager(context: modelContext)
-        await manager.syncPapers(for: categories)
-    }
-    
-    
-
     var body: some View {
         PaperScaffold(
             background: {
@@ -320,9 +303,10 @@ struct HomeView: View {
         guard !hasFetchedToday else { return }
 
         let today = Calendar.current.startOfDay(for: Date())
-        let lastFetch = UserDefaults.standard.object(forKey: lastFetchKey) as? Date
+        let lastFetchDay = (UserDefaults.standard.object(forKey: lastFetchKey) as? Date)
+            .map(Calendar.current.startOfDay)
 
-        if lastFetch == nil || Calendar.current.startOfDay(for: lastFetch!) < today {
+        if lastFetchDay == nil || lastFetchDay! < today {
             await fetchLatestPapers()
             UserDefaults.standard.set(Date(), forKey: lastFetchKey)
         }
@@ -333,11 +317,7 @@ struct HomeView: View {
     private func fetchLatestPapers() async {
         let categories = settingsStore.selectedCategories
         guard !categories.isEmpty else {
-            refreshMessage = "Choose categories in Settings"
-            withAnimation { showRefreshMessage = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                withAnimation { showRefreshMessage = false }
-            }
+            flashRefreshMessage("Choose categories in Settings")
             return
         }
 
@@ -348,10 +328,16 @@ struct HomeView: View {
         let afterCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
 
         let delta = max(afterCount - beforeCount, 0)
-        refreshMessage = delta > 0 ? "Added \(delta) papers!" : "No new papers to add"
+        flashRefreshMessage(delta > 0 ? "Added \(delta) papers!" : "No new papers to add")
+    }
 
+    private func flashRefreshMessage(_ message: String) {
+        refreshMessageTask?.cancel()
+        refreshMessage = message
         withAnimation { showRefreshMessage = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        refreshMessageTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
             withAnimation { showRefreshMessage = false }
         }
     }

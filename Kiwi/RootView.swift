@@ -25,7 +25,7 @@ struct RootView: View {
                         .opacity(hasCompletedOnboarding ? 0 : 1)
                         .allowsHitTesting(!hasCompletedOnboarding) // prevent taps during/after fade
                 }
-                .animation(.easeInOut(duration: 3.0), value: hasCompletedOnboarding)
+                .animation(.easeInOut(duration: 0.25), value: hasCompletedOnboarding)
                 .navigationDestination(for: KiwiRouter.Route.self) { route in
                     switch route {
                     case .daily: DailyPapersView()

@@ -36,11 +36,6 @@ struct PaperScaffold<
                 }
             }
 
-            // Bottom overlay floats above list content
-//            VStack {
-//                Spacer()
-//                bottomOverlay()
-//            }
             .safeAreaInset(edge: .bottom) {
                 bottomOverlay()
             }

@@ -15,7 +15,6 @@ struct SideMenuButton: View {
                 .frame(width: 20, height: 16)
                 .padding(10)
                 .background(Circle().fill(KiwiColors.creamWhite))
-//                .overlay(Circle().stroke(KiwiColors.creamWhite, lineWidth: 1))
                 .foregroundColor(KiwiColors.darkBrown)
         }
         .buttonStyle(.plain)
@@ -36,7 +35,6 @@ struct ReadingListNavButton: View {
                 .frame(width: 18, height: 18)
                 .padding(10)
                 .background(Circle().fill(KiwiColors.creamWhite))
-//                .overlay(Circle().stroke(KiwiColors.lightGreen, lineWidth: 1))
                 .foregroundColor(KiwiColors.darkBrown)
         }
         .buttonStyle(.plain)
