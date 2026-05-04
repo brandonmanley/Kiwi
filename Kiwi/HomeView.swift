@@ -18,6 +18,7 @@ struct HomeView: View {
     @State private var refreshMessage: String = ""
     @State private var showRefreshMessage = false
     @State private var refreshMessageTask: Task<Void, Never>?
+    @State private var isRefreshing = false
 
     enum PaperFilter: String, CaseIterable {
         case new = "New"
@@ -49,19 +50,15 @@ struct HomeView: View {
             base = papers.filter { $0.isUpdate }
         }
 
-        let keywords = settingsStore.keywords
-        guard !keywords.isEmpty else { return base }
+        guard let prepared = KeywordScorer.prepare(keywords: settingsStore.keywords) else { return base }
 
-        let scored: [(paper: Paper, score: Double)] = base.map { paper in
-            (paper, KeywordScorer.score(paper: paper, keywords: keywords))
-        }
-
-        return scored
+        return base
+            .map { ($0, KeywordScorer.score(paper: $0, prepared: prepared)) }
             .sorted { lhs, rhs in
-                if lhs.score != rhs.score { return lhs.score > rhs.score }
-                return lhs.paper.date > rhs.paper.date
+                if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+                return lhs.0.date > rhs.0.date
             }
-            .map(\.paper)
+            .map(\.0)
     }
     
 
@@ -281,21 +278,29 @@ struct HomeView: View {
     private var emptyState: some View {
         ScrollView {
             VStack(spacing: 10) {
-                Spacer(minLength: 140)
+                if isRefreshing {
+                    RefreshingDotsView()
+                        .padding(.top, 40)
+                }
+
+                Spacer(minLength: isRefreshing ? 100 : 140)
 
                 Text("No papers for today yet")
                     .font(.custom("ArialRoundedMTBold", size: 20))
                     .foregroundColor(KiwiColors.darkBrown)
 
-                Spacer(minLength: 400) // <- ensures there's enough scroll room to pull
+                Spacer(minLength: 400)
             }
             .frame(maxWidth: .infinity)
             .padding(.horizontal)
         }
         .scrollIndicators(.hidden)
         .refreshable {
+            isRefreshing = true
             await fetchLatestPapers()
+            isRefreshing = false
         }
+        .tint(.clear)
     }
 
     // MARK: - Fetch logic

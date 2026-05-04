@@ -8,16 +8,19 @@ struct DailyPapersView: View {
     @Query(sort: \Paper.date, order: .reverse)
     private var papers: [Paper]
 
+    @State private var isRefreshing = false
+
     private static let dayCalendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = .current
         return cal
     }()
 
-    // MARK: - Group papers by day
+    // MARK: - Group papers by day (last 7 days only)
     private var days: [(day: Date, papers: [Paper])] {
         let cal = Self.dayCalendar
-        let grouped = Dictionary(grouping: papers) { cal.startOfDay(for: $0.date) }
+        let cutoff = cal.startOfDay(for: cal.date(byAdding: .day, value: -7, to: Date()) ?? Date())
+        let grouped = Dictionary(grouping: papers.filter { $0.date >= cutoff }) { cal.startOfDay(for: $0.date) }
         return grouped
             .map { (day: $0.key, papers: $0.value) }
             .sorted { $0.day > $1.day }
@@ -67,6 +70,11 @@ struct DailyPapersView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 14) {
+                            if isRefreshing {
+                                RefreshingDotsView()
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                            }
                             ForEach(days, id: \.day) { entry in
                                 NavigationLink {
                                     PapersForDayView(papers: entry.papers, day: entry.day)
@@ -87,8 +95,12 @@ struct DailyPapersView: View {
                         .padding(.top, 12)
                         .padding(.bottom, 18)
                     }
-                    .refreshable { await refreshDailyPapers() }
-                    .tint(KiwiColors.darkBrown)
+                    .refreshable {
+                        isRefreshing = true
+                        await refreshDailyPapers()
+                        isRefreshing = false
+                    }
+                    .tint(.clear)
                 }
             }
         }

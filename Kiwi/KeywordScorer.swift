@@ -8,44 +8,42 @@ struct KeywordScorer {
         var authors: Double = 3.0
         var abstract: Double = 2.0
         var phraseBonus: Double = 2.0
-        var multiHitBonus: Double = 1.0   // small bonus per additional distinct keyword hit
+        var multiHitBonus: Double = 1.0
     }
 
-    static func score(paper: Paper, keywords: [String], weights: Weights = .init()) -> Double {
-        let normalizedKeywords = normalizeKeywords(keywords)
-        guard !normalizedKeywords.isEmpty else { return 0 }
+    struct PreparedKeywords {
+        let normalized: [String]
+        let tokens: Set<String>
+    }
 
-        // Phrase bonus: if a multi-word keyword appears literally in any field.
-        // (This helps a lot for things like “color glass condensate”.)
+    static func prepare(keywords: [String]) -> PreparedKeywords? {
+        let normalized = normalizeKeywords(keywords)
+        guard !normalized.isEmpty else { return nil }
+        let tokens = Set(normalized.flatMap { tokenSet($0) }.filter { !$0.isEmpty })
+        guard !tokens.isEmpty else { return nil }
+        return PreparedKeywords(normalized: normalized, tokens: tokens)
+    }
+
+    static func score(paper: Paper, prepared: PreparedKeywords, weights: Weights = .init()) -> Double {
         let haystackAll = normalizeText(paper.title + " " + paper.authors.joined(separator: " ") + " " + paper.abstract)
         var score: Double = 0
-        for kw in normalizedKeywords where kw.contains(" ") {
+        for kw in prepared.normalized where kw.contains(" ") {
             if haystackAll.contains(kw) { score += weights.phraseBonus }
         }
 
-        // Token sets (lemmatized)
         let titleTokens = tokenSet(paper.title)
         let authorTokens = tokenSet(paper.authors.joined(separator: " "))
         let abstractTokens = tokenSet(paper.abstract)
 
-        // Keyword tokens (lemmatized per keyword)
-        // We treat each keyword as a token (or tokens for multi-word; phrase handled above).
-        let keywordTokens = Set(normalizedKeywords
-            .flatMap { tokenSet($0) }
-            .filter { !$0.isEmpty }
-        )
-
-        // Count distinct hits in each field
-        let titleHits = titleTokens.intersection(keywordTokens).count
-        let authorHits = authorTokens.intersection(keywordTokens).count
-        let abstractHits = abstractTokens.intersection(keywordTokens).count
+        let titleHits = titleTokens.intersection(prepared.tokens).count
+        let authorHits = authorTokens.intersection(prepared.tokens).count
+        let abstractHits = abstractTokens.intersection(prepared.tokens).count
 
         score += Double(titleHits) * weights.title
         score += Double(authorHits) * weights.authors
         score += Double(abstractHits) * weights.abstract
 
-        // Small bonus if multiple distinct keywords hit anywhere
-        let distinctHits = Set(titleTokens.union(authorTokens).union(abstractTokens)).intersection(keywordTokens).count
+        let distinctHits = titleTokens.union(authorTokens).union(abstractTokens).intersection(prepared.tokens).count
         if distinctHits > 1 {
             score += Double(distinctHits - 1) * weights.multiHitBonus
         }
@@ -53,25 +51,29 @@ struct KeywordScorer {
         return score
     }
 
+    static func score(paper: Paper, keywords: [String], weights: Weights = .init()) -> Double {
+        guard let prepared = prepare(keywords: keywords) else { return 0 }
+        return score(paper: paper, prepared: prepared, weights: weights)
+    }
+
     // MARK: - Normalization / tokenization
 
-    private static func normalizeKeywords(_ keywords: [String]) -> [String] {
+    static func normalizeKeywords(_ keywords: [String]) -> [String] {
         keywords
             .map { normalizeText($0) }
             .filter { !$0.isEmpty }
     }
 
-    private static func normalizeText(_ s: String) -> String {
+    static func normalizeText(_ s: String) -> String {
         s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
          .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
          .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func tokenSet(_ text: String) -> Set<String> {
+    static func tokenSet(_ text: String) -> Set<String> {
         let normalized = normalizeText(text)
         guard !normalized.isEmpty else { return [] }
 
-        // Lemmatize using NLTagger (native Apple)
         let tagger = NLTagger(tagSchemes: [.lemma])
         tagger.string = normalized
 
@@ -83,7 +85,6 @@ struct KeywordScorer {
             let surface = String(normalized[tokenRange])
             let lemma = tag?.rawValue ?? surface
 
-            // Keep it simple: drop 1-char tokens, numbers
             if lemma.count >= 2, lemma.rangeOfCharacter(from: .decimalDigits) == nil {
                 out.insert(lemma)
             }

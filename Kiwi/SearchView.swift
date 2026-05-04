@@ -228,18 +228,17 @@ struct SearchView: View {
             case .updates: base = base.filter { $0.isUpdate }
             }
 
-            guard !q.isEmpty else {
+            guard !q.isEmpty, let prepared = SearchScorer.prepare(query: q) else {
                 return base.sorted(by: { $0.date > $1.date }).map(\.id)
             }
 
             let scored: [(id: UUID, score: Double, date: Date)] = base.map { p in
-                let weights = SearchScorer.Weights()
                 let s = SearchScorer.score(
                     title: p.title,
                     authors: p.authors,
                     abstract: p.abstract,
-                    query: q,
-                    weights: weights
+                    prepared: prepared,
+                    weights: SearchScorer.Weights()
                 )
                 return (p.id, s, p.date)
             }
@@ -379,7 +378,6 @@ struct SearchView: View {
 
 private enum SearchScorer {}
 
-// The scorer is pure string processing; make it callable from any actor context.
 nonisolated(unsafe) extension SearchScorer {
     struct Weights {
         var title: Double = 6.0
@@ -389,35 +387,49 @@ nonisolated(unsafe) extension SearchScorer {
         var multiHitBonus: Double = 0.35
     }
 
-    static func score(title: String, authors: String, abstract: String, query: String, weights: Weights) -> Double {
-        let q = normalizeText(query)
-        guard !q.isEmpty else { return 0 }
+    struct PreparedQuery {
+        let normalized: String
+        let tokens: Set<String>
+    }
 
+    static func prepare(query: String) -> PreparedQuery? {
+        let q = normalizeText(query)
+        guard !q.isEmpty else { return nil }
+        let tokens = tokenSet(q)
+        guard !tokens.isEmpty else { return nil }
+        return PreparedQuery(normalized: q, tokens: tokens)
+    }
+
+    static func score(title: String, authors: String, abstract: String, prepared: PreparedQuery, weights: Weights) -> Double {
         let hayAll = normalizeText(title + " " + authors + " " + abstract)
         var score: Double = 0
-        if q.count >= 3, hayAll.contains(q) { score += weights.phraseBonus }
-
-        let qTokens = tokenSet(q)
-        guard !qTokens.isEmpty else { return score }
+        if prepared.normalized.count >= 3, hayAll.contains(prepared.normalized) {
+            score += weights.phraseBonus
+        }
 
         let titleTokens = tokenSet(title)
         let authorTokens = tokenSet(authors)
         let abstractTokens = tokenSet(abstract)
 
-        let titleHits = titleTokens.intersection(qTokens).count
-        let authorHits = authorTokens.intersection(qTokens).count
-        let abstractHits = abstractTokens.intersection(qTokens).count
+        let titleHits = titleTokens.intersection(prepared.tokens).count
+        let authorHits = authorTokens.intersection(prepared.tokens).count
+        let abstractHits = abstractTokens.intersection(prepared.tokens).count
 
         score += Double(titleHits) * weights.title
         score += Double(authorHits) * weights.authors
         score += Double(abstractHits) * weights.abstract
 
-        let distinctHits = Set(titleTokens.union(authorTokens).union(abstractTokens)).intersection(qTokens).count
+        let distinctHits = titleTokens.union(authorTokens).union(abstractTokens).intersection(prepared.tokens).count
         if distinctHits > 1 {
             score += Double(distinctHits - 1) * weights.multiHitBonus
         }
 
         return score
+    }
+
+    static func score(title: String, authors: String, abstract: String, query: String, weights: Weights) -> Double {
+        guard let prepared = prepare(query: query) else { return 0 }
+        return score(title: title, authors: authors, abstract: abstract, prepared: prepared, weights: weights)
     }
 
     private static func normalizeText(_ s: String) -> String {

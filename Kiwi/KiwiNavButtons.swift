@@ -22,6 +22,23 @@ struct SideMenuButton: View {
     }
 }
 
+struct RefreshingDotsView: View {
+    @State private var dotCount = 1
+
+    var body: some View {
+        Text(String(repeating: ".", count: dotCount))
+            .font(.custom("ArialRoundedMTBold", size: 28))
+            .foregroundColor(KiwiColors.darkBrown)
+            .frame(width: 40)
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    dotCount = dotCount % 3 + 1
+                }
+            }
+    }
+}
+
 struct ReadingListNavButton: View {
     @EnvironmentObject private var router: KiwiRouter
 

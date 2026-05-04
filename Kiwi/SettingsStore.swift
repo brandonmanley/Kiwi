@@ -128,7 +128,7 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    static func normalizeCategories(_ categories: [String]) -> [String] {
+    nonisolated static func normalizeCategories(_ categories: [String]) -> [String] {
         Array(Set(categories.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }))
             .filter { !$0.isEmpty }
             .sorted()
@@ -159,7 +159,7 @@ extension SettingsStore {
         setKeywords(settings.keywords.filter { $0 != trimmed }) // ✅ normalize + persist
     }
 
-    static func normalizeKeywords(_ keywords: [String]) -> [String] {
+    nonisolated static func normalizeKeywords(_ keywords: [String]) -> [String] {
         Array(Set(keywords
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

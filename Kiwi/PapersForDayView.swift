@@ -67,6 +67,7 @@ struct PapersForDayView: View {
     @EnvironmentObject private var settingsStore: SettingsStore
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
     @State private var activeFilter: PaperFilter = .new
 
     enum PaperFilter: String, CaseIterable {
@@ -86,19 +87,15 @@ struct PapersForDayView: View {
             base = papers.filter { $0.isUpdate }
         }
 
-        let keywords = settingsStore.keywords
-        guard !keywords.isEmpty else { return base }
+        guard let prepared = KeywordScorer.prepare(keywords: settingsStore.keywords) else { return base }
 
-        let scored: [(paper: Paper, score: Double)] = base.map { paper in
-            (paper, KeywordScorer.score(paper: paper, keywords: keywords))
-        }
-
-        return scored
+        return base
+            .map { ($0, KeywordScorer.score(paper: $0, prepared: prepared)) }
             .sorted { lhs, rhs in
-                if lhs.score != rhs.score { return lhs.score > rhs.score }
-                return lhs.paper.date > rhs.paper.date
+                if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+                return lhs.0.date > rhs.0.date
             }
-            .map(\.paper)
+            .map(\.0)
     }
 
     private var counts: (new: Int, crossList: Int, updates: Int) {
@@ -123,32 +120,31 @@ struct PapersForDayView: View {
                 KiwiColors.creamWhite
             },
             header: {
-                // Same navbar “feel” as HomeView, but with a calendar button overlayed
-                ZStack {
-                    KiwiAppNavBar(showReadingListButton: false) {
+                KiwiNavBar(
+                    title: {
                         Text(day.formatted(.dateTime.weekday(.abbreviated)
                             .month(.abbreviated)
                             .day()
                             .year()))
                         .font(.custom("Pulang", size: 22))
                         .foregroundColor(KiwiColors.darkBrown)
-                    }
-
-                    HStack {
-                        Spacer()
-                        NavigationLink {
-                            DailyPapersView()
-                        } label: {
-                            Image(systemName: "calendar")
-                                .font(.system(size: 18, weight: .semibold))
-                                .frame(width: 36, height: 36)
-                                .background(Circle().fill(KiwiColors.creamWhite.opacity(0.7)))
+                    },
+                    left: {
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.left")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 12, height: 16)
+                                .padding(10)
+                                .background(Circle().fill(KiwiColors.creamWhite))
                                 .foregroundColor(KiwiColors.darkBrown)
                         }
                         .buttonStyle(.plain)
-                        .padding(.trailing, 14)
+                    },
+                    right: {
+                        ReadingListNavButton()
                     }
-                }
+                )
             },
             items: filteredPapers,
             row: { paper in

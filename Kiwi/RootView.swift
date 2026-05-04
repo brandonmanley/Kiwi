@@ -51,6 +51,25 @@ struct RootView: View {
                         .padding(.leading, 260)
                 }
             }
+            .overlay(alignment: .top) {
+                if !uiState.isConnected {
+                    HStack(spacing: 6) {
+                        Image(systemName: "wifi.slash")
+                            .font(.system(size: 12))
+                        Text("No connection")
+                            .font(.custom("ArialRoundedMTBold", size: 12))
+                    }
+                    .foregroundColor(KiwiColors.creamWhite)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        Capsule().fill(KiwiColors.darkBrown.opacity(0.85))
+                    )
+                    .padding(.top, 54)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.3), value: uiState.isConnected)
         }
         .background(KiwiColors.lightGreen.ignoresSafeArea())
     }
