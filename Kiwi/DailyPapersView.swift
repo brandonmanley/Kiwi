@@ -117,6 +117,15 @@ private struct DayShelfRow: View {
 
     private var booksCount: Int { Self.booksForCount(paperCount, maxBooks: 16) }
 
+    private var triageEstimate: String {
+        let totalSeconds = paperCount * 5
+        if totalSeconds < 60 {
+            return "< 1 minute"
+        }
+        let minutes = Int(round(Double(totalSeconds) / 60.0))
+        return minutes == 1 ? "1 minute" : "\(minutes) minutes"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             shelfView
@@ -135,7 +144,7 @@ private struct DayShelfRow: View {
 
                 Spacer()
 
-                Text("\(paperCount) papers")
+                Text("\(paperCount) papers (\(triageEstimate))")
                     .font(.custom("Pulang", size: 14))
                     .foregroundColor(KiwiColors.darkBrown.opacity(clicked ? 0.65 : 0.90))
             }

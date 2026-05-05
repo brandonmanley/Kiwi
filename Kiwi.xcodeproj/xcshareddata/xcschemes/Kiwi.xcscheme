@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A4EAD8D52F144DB3001C3E52"
-               BuildableName = "Kiwi.app"
+               BuildableName = "Kiwi: Daily scientific papers.app"
                BlueprintName = "Kiwi"
                ReferencedContainer = "container:Kiwi.xcodeproj">
             </BuildableReference>
@@ -69,7 +69,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A4EAD8D52F144DB3001C3E52"
-            BuildableName = "Kiwi.app"
+            BuildableName = "Kiwi: Daily scientific papers.app"
             BlueprintName = "Kiwi"
             ReferencedContainer = "container:Kiwi.xcodeproj">
          </BuildableReference>
@@ -86,7 +86,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A4EAD8D52F144DB3001C3E52"
-            BuildableName = "Kiwi.app"
+            BuildableName = "Kiwi: Daily scientific papers.app"
             BlueprintName = "Kiwi"
             ReferencedContainer = "container:Kiwi.xcodeproj">
          </BuildableReference>

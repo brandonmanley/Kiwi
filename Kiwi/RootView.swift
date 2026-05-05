@@ -32,6 +32,7 @@ struct RootView: View {
                     case .readingList: ReadingListView()
                     case .settings: SettingsView()
                     case .search: SearchView()
+                    case .author: AuthorView()
                     }
                 }
             }

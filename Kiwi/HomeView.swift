@@ -9,6 +9,7 @@ struct HomeView: View {
     @EnvironmentObject private var settingsStore: SettingsStore
 
     @State private var selectedURL: IdentifiableURL?
+    @State private var shareURL: IdentifiableURL?
     @State private var expandedPaperID: Paper.ID?
 
     @State private var activeFilter: PaperFilter = .new
@@ -100,6 +101,10 @@ struct HomeView: View {
                 paperRow(paper)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
+                    .onLongPressGesture {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        shareURL = IdentifiableURL(url: paper.url)
+                    }
                     .onTapGesture {
                         let isExpanded = (expandedPaperID == paper.id)
                         expandedPaperID = isExpanded ? nil : paper.id
@@ -135,6 +140,10 @@ struct HomeView: View {
         .task { await autoFetchIfNeeded() }
         .sheet(item: $selectedURL) { wrapper in
             SafariView(url: wrapper.url)
+        }
+        .sheet(item: $shareURL) { wrapper in
+            ShareSheet(items: [wrapper.url])
+                .presentationDetents([.medium])
         }
         .navigationBarBackButtonHidden(true)
         .overlay(alignment: .bottom) {
@@ -182,9 +191,10 @@ struct HomeView: View {
 
     private func filterButton(_ filter: PaperFilter) -> some View {
         Button { activeFilter = filter } label: {
-            Text(letter(for: filter))
-                .font(.custom("Pulang", size: 16))
-                .frame(width: 32, height: 28)
+            Text(label(for: filter))
+                .font(.custom("Pulang", size: 13))
+                .padding(.horizontal, 10)
+                .frame(height: 28)
                 .foregroundColor(activeFilter == filter ? KiwiColors.creamWhite : KiwiColors.darkBrown)
                 .background(activeFilter == filter ? KiwiColors.darkGreen : Color.clear)
                 .cornerRadius(8)
@@ -226,9 +236,11 @@ struct HomeView: View {
                 }
 
                 HStack(alignment: .firstTextBaseline) {
-                    Text(paper.authors.truncatedAuthors())
-                        .font(.caption)
-                        .foregroundColor(KiwiColors.darkBrown)
+                    KeywordHighlightedText(
+                        text: paper.authors.truncatedAuthors(),
+                        keywords: settingsStore.keywords
+                    )
+                    .font(.caption)
 
                     Spacer()
 
@@ -260,11 +272,11 @@ struct HomeView: View {
         .padding(.vertical, 6)
     }
 
-    private func letter(for filter: PaperFilter) -> String {
+    private func label(for filter: PaperFilter) -> String {
         switch filter {
-        case .new: return "N"
-        case .crossList: return "C"
-        case .updates: return "U"
+        case .new: return "New"
+        case .crossList: return "Cross"
+        case .updates: return "Updates"
         }
     }
 

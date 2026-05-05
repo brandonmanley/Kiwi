@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A40261612FAA5062003327D4 /* AuthorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40261602FAA5062003327D4 /* AuthorView.swift */; };
 		A494BFB82F16F64200B027CB /* LaTeXSwiftUI in Frameworks */ = {isa = PBXBuildFile; productRef = A494BFB72F16F64200B027CB /* LaTeXSwiftUI */; };
 /* End PBXBuildFile section */
 
@@ -28,9 +29,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A40261602FAA5062003327D4 /* AuthorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorView.swift; sourceTree = "<group>"; };
 		A4C1CE5F2F15DDF3009EC840 /* iosMath.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = iosMath.xcodeproj; sourceTree = "<group>"; };
 		A4C902A02F15DCC500607581 /* iosMath.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = iosMath.xcodeproj; sourceTree = "<group>"; };
-		A4EAD8D62F144DB3001C3E52 /* Kiwi.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kiwi.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A4EAD8D62F144DB3001C3E52 /* Kiwi: Daily scientific papers.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Kiwi: Daily scientific papers.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A4EAD8E72F144DB6001C3E52 /* KiwiTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KiwiTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A4EAD8F12F144DB6001C3E52 /* KiwiUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KiwiUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -121,13 +123,14 @@
 				A4EAD8F42F144DB6001C3E52 /* KiwiUITests */,
 				A4C902DC2F15DDA600607581 /* Frameworks */,
 				A4EAD8D72F144DB3001C3E52 /* Products */,
+				A40261602FAA5062003327D4 /* AuthorView.swift */,
 			);
 			sourceTree = "<group>";
 		};
 		A4EAD8D72F144DB3001C3E52 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A4EAD8D62F144DB3001C3E52 /* Kiwi.app */,
+				A4EAD8D62F144DB3001C3E52 /* Kiwi: Daily scientific papers.app */,
 				A4EAD8E72F144DB6001C3E52 /* KiwiTests.xctest */,
 				A4EAD8F12F144DB6001C3E52 /* KiwiUITests.xctest */,
 			);
@@ -157,7 +160,7 @@
 				A494BFB72F16F64200B027CB /* LaTeXSwiftUI */,
 			);
 			productName = Kiwi;
-			productReference = A4EAD8D62F144DB3001C3E52 /* Kiwi.app */;
+			productReference = A4EAD8D62F144DB3001C3E52 /* Kiwi: Daily scientific papers.app */;
 			productType = "com.apple.product-type.application";
 		};
 		A4EAD8E62F144DB6001C3E52 /* KiwiTests */ = {
@@ -292,6 +295,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A40261612FAA5062003327D4 /* AuthorView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -332,7 +336,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Kiwi/Kiwi.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = YT6STRGH3G;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -347,7 +351,7 @@
 				);
 				MARKETING_VERSION = 0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = miso.Kiwi;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Kiwi: Daily scientific papers";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -365,7 +369,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Kiwi/Kiwi.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = YT6STRGH3G;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -380,7 +384,7 @@
 				);
 				MARKETING_VERSION = 0.9;
 				PRODUCT_BUNDLE_IDENTIFIER = miso.Kiwi;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "Kiwi: Daily scientific papers";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;

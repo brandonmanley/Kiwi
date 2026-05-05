@@ -234,6 +234,32 @@ private enum ArxivFetcher {
         return accumulated
     }
 
+    static func fetchByAuthor(name: String, maxResults: Int = 10) async -> [URL: ParsedPaper] {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [:] }
+
+        var components = URLComponents(string: "https://export.arxiv.org/api/query")!
+        components.queryItems = [
+            URLQueryItem(name: "search_query", value: "au:\"\(trimmed)\""),
+            URLQueryItem(name: "start", value: "0"),
+            URLQueryItem(name: "max_results", value: "\(maxResults)"),
+            URLQueryItem(name: "sortBy", value: "submittedDate"),
+            URLQueryItem(name: "sortOrder", value: "descending"),
+        ]
+
+        guard let url = components.url else { return [:] }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            return ArxivPageParser().parse(data)
+        } catch {
+            #if DEBUG
+            print("⚠️ Failed to fetch papers for author \(name): \(error)")
+            #endif
+            return [:]
+        }
+    }
+
     private static func mergePapers(_ source: [URL: ParsedPaper], into target: inout [URL: ParsedPaper]) {
         for (url, paper) in source {
             if var existing = target[url] {
@@ -272,6 +298,47 @@ final class NetworkManager {
     }
 
     // MARK: - Public API
+
+    func fetchPapersByAuthor(name: String, maxResults: Int = 10) async -> [Paper] {
+        let fetched = await ArxivFetcher.fetchByAuthor(name: name, maxResults: maxResults)
+
+        var result: [Paper] = []
+
+        do {
+            let stored = try modelContext.fetch(FetchDescriptor<Paper>())
+            let storedByURL = Dictionary(uniqueKeysWithValues: stored.map { ($0.url, $0) })
+
+            for parsed in fetched.values {
+                guard let url = parsed.url else { continue }
+
+                if let existing = storedByURL[url] {
+                    result.append(existing)
+                } else {
+                    let paper = Paper(
+                        title: parsed.title,
+                        authors: parsed.authors,
+                        abstract: parsed.abstract,
+                        url: url,
+                        categories: Array(parsed.categories),
+                        primaryCategory: parsed.primaryCategory ?? "unknown",
+                        date: Self.announcementDate(from: parsed.updatedDate ?? parsed.submittedDate ?? Date()),
+                        isUpdate: parsed.submittedDate != parsed.updatedDate,
+                        isCrosslist: false
+                    )
+                    modelContext.insert(paper)
+                    result.append(paper)
+                }
+            }
+
+            try modelContext.save()
+        } catch {
+            #if DEBUG
+            print("⚠️ Failed to store author papers: \(error)")
+            #endif
+        }
+
+        return result.sorted { $0.date > $1.date }
+    }
 
     func syncPapers(
         for categories: [String],

@@ -9,6 +9,7 @@ final class KiwiRouter: ObservableObject {
         case readingList
         case settings
         case search
+        case author
     }
 
     @Published var path = NavigationPath()

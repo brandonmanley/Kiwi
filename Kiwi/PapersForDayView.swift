@@ -19,6 +19,49 @@ struct IdentifiableURL: Identifiable {
     let url: URL
 }
 
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+struct KeywordHighlightedText: View {
+    let text: String
+    let keywords: [String]
+    var baseColor: Color = KiwiColors.darkBrown
+    var highlightColor: Color = KiwiColors.darkGreen
+
+    var body: some View {
+        Text(buildAttributedString())
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func buildAttributedString() -> AttributedString {
+        var result = AttributedString(text)
+        result.foregroundColor = baseColor
+
+        guard !keywords.isEmpty else { return result }
+
+        for keyword in keywords {
+            let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            var searchStart = result.startIndex
+            while searchStart < result.endIndex,
+                  let range = result[searchStart..<result.endIndex].range(of: trimmed, options: .caseInsensitive) {
+                result[range].foregroundColor = highlightColor
+                result[range].inlinePresentationIntent = .stronglyEmphasized
+                searchStart = range.upperBound
+            }
+        }
+
+        return result
+    }
+}
+
 extension Array where Element == String {
     func truncatedAuthors(maxAuthors: Int = 4) -> String {
         guard !isEmpty else { return "" }
@@ -63,6 +106,7 @@ struct PapersForDayView: View {
     let day: Date
 
     @State private var selectedURL: IdentifiableURL?
+    @State private var shareURL: IdentifiableURL?
     @State private var expandedPaperID: Paper.ID?
     @EnvironmentObject private var settingsStore: SettingsStore
 
@@ -151,11 +195,14 @@ struct PapersForDayView: View {
                 paperRow(paper)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
+                    .onLongPressGesture {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        shareURL = IdentifiableURL(url: paper.url)
+                    }
                     .onTapGesture {
                         let isExpanded = (expandedPaperID == paper.id)
                         expandedPaperID = isExpanded ? nil : paper.id
                     }
-                    // Same swipe behavior as HomeView
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button {
                             paper.saved.toggle()
@@ -189,6 +236,10 @@ struct PapersForDayView: View {
         .sheet(item: $selectedURL) { wrapper in
             SafariView(url: wrapper.url)
         }
+        .sheet(item: $shareURL) { wrapper in
+            ShareSheet(items: [wrapper.url])
+                .presentationDetents([.medium])
+        }
         .navigationBarBackButtonHidden(true)
     }
 
@@ -220,9 +271,10 @@ struct PapersForDayView: View {
 
     private func filterButton(_ filter: PaperFilter) -> some View {
         Button { activeFilter = filter } label: {
-            Text(letter(for: filter))
-                .font(.custom("Pulang", size: 16))
-                .frame(width: 32, height: 28)
+            Text(label(for: filter))
+                .font(.custom("Pulang", size: 13))
+                .padding(.horizontal, 10)
+                .frame(height: 28)
                 .foregroundColor(activeFilter == filter ? KiwiColors.creamWhite : KiwiColors.darkBrown)
                 .background(activeFilter == filter ? KiwiColors.darkGreen : Color.clear)
                 .cornerRadius(8)
@@ -230,11 +282,11 @@ struct PapersForDayView: View {
         .buttonStyle(.plain)
     }
 
-    private func letter(for filter: PaperFilter) -> String {
+    private func label(for filter: PaperFilter) -> String {
         switch filter {
-        case .new: return "N"
-        case .crossList: return "C"
-        case .updates: return "U"
+        case .new: return "New"
+        case .crossList: return "Cross"
+        case .updates: return "Updates"
         }
     }
 
@@ -272,9 +324,11 @@ struct PapersForDayView: View {
                 }
 
                 HStack(alignment: .firstTextBaseline) {
-                    Text(paper.authors.truncatedAuthors())
-                        .font(.caption)
-                        .foregroundColor(KiwiColors.darkBrown)
+                    KeywordHighlightedText(
+                        text: paper.authors.truncatedAuthors(),
+                        keywords: settingsStore.keywords
+                    )
+                    .font(.caption)
 
                     Spacer()
 

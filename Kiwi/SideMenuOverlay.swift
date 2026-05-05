@@ -114,6 +114,18 @@ struct SideMenuOverlay: View {
             }
             .buttonStyle(.plain)
 
+            Button {
+                router.go(.author)
+                close(animated: false)
+            } label: {
+                menuButton(
+                    title: "Author",
+                    systemImage: "person.fill",
+                    isSelected: router.currentRoute == .author
+                )
+            }
+            .buttonStyle(.plain)
+
             Spacer()
 
             HStack {
