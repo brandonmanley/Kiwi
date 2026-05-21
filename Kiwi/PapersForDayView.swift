@@ -19,6 +19,14 @@ struct IdentifiableURL: Identifiable {
     let url: URL
 }
 
+extension URL {
+    var arxivPDF: URL {
+        let str = absoluteString
+        guard str.contains("/abs/") else { return self }
+        return URL(string: str.replacingOccurrences(of: "/abs/", with: "/pdf/")) ?? self
+    }
+}
+
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]
 
@@ -206,6 +214,7 @@ struct PapersForDayView: View {
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button {
                             paper.saved.toggle()
+                            paper.savedDate = paper.saved ? Date() : nil
                             UINotificationFeedbackGenerator()
                                 .notificationOccurred(paper.saved ? .success : .warning)
                         } label: {
@@ -221,6 +230,13 @@ struct PapersForDayView: View {
                             Label("arXiv", systemImage: "safari")
                         }
                         .tint(.blue)
+
+                        Button {
+                            selectedURL = IdentifiableURL(url: paper.url.arxivPDF)
+                        } label: {
+                            Label("PDF", systemImage: "doc.text")
+                        }
+                        .tint(.purple)
                     }
             },
             emptyState: {
@@ -352,7 +368,7 @@ struct PapersForDayView: View {
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(KiwiColors.darkGreen)
+                            .fill(KiwiColors.darkBrown)
                     )
                     .allowsHitTesting(false)
             }
@@ -371,11 +387,11 @@ struct PapersForDayView: View {
         VStack(spacing: 10) {
             Spacer()
             Text("No papers for this day")
-                .font(.custom("ArialRoundedMTBold", size: 20))
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
                 .foregroundColor(KiwiColors.darkBrown)
 
             Text("Try a different day from the calendar.")
-                .font(.custom("ArialRoundedMTBold", size: 14))
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundColor(KiwiColors.darkBrown.opacity(0.8))
 
             Spacer()

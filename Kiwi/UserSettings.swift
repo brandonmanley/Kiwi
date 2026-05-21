@@ -11,6 +11,7 @@ final class UserSettings {
     var hapticsDisabled: Bool
     var darkModeEnabled: Bool
     var keywords: [String]
+    var dailyPapersDays: Int
 
     init(
         id: UUID = UUID(),
@@ -19,7 +20,8 @@ final class UserSettings {
         hasCompletedOnboarding: Bool = false,
         hapticsDisabled: Bool = false,
         darkModeEnabled: Bool = false,
-        keywords: [String] = []
+        keywords: [String] = [],
+        dailyPapersDays: Int = 7
     ) {
         self.id = id
         self.selectedCategories = selectedCategories
@@ -28,5 +30,6 @@ final class UserSettings {
         self.hapticsDisabled = hapticsDisabled
         self.darkModeEnabled = darkModeEnabled
         self.keywords = keywords
+        self.dailyPapersDays = dailyPapersDays
     }
 }

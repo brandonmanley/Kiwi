@@ -61,6 +61,7 @@ struct SearchView: View {
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button {
                             item.paper.saved.toggle()
+                            item.paper.savedDate = item.paper.saved ? Date() : nil
                             Task { @MainActor in
                                 let generator = UINotificationFeedbackGenerator()
                                 generator.notificationOccurred(item.paper.saved ? .success : .warning)
@@ -78,6 +79,13 @@ struct SearchView: View {
                             Label("arXiv", systemImage: "safari")
                         }
                         .tint(.blue)
+
+                        Button {
+                            selectedURL = IdentifiableURL(url: item.paper.url.arxivPDF)
+                        } label: {
+                            Label("PDF", systemImage: "doc.text")
+                        }
+                        .tint(.purple)
                     }
             },
             emptyState: { emptyState },
@@ -115,7 +123,7 @@ struct SearchView: View {
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
 
                 TextField("Search titles, authors, abstracts…", text: $query)
-                    .font(.custom("ArialRoundedMTBold", size: 14))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
@@ -155,7 +163,7 @@ struct SearchView: View {
                     ForEach(Scope.allCases, id: \.self) { s in
                         Button { scope = s } label: {
                             Text(s.rawValue)
-                                .font(.custom("ArialRoundedMTBold", size: 12))
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
                                 .foregroundColor(scope == s ? KiwiColors.creamWhite : KiwiColors.darkBrown)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
@@ -173,7 +181,7 @@ struct SearchView: View {
                             Image(systemName: savedOnly ? "bookmark.fill" : "bookmark")
                             Text("Saved")
                         }
-                        .font(.custom("ArialRoundedMTBold", size: 12))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundColor(savedOnly ? KiwiColors.creamWhite : KiwiColors.darkBrown)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -310,7 +318,7 @@ struct SearchView: View {
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(KiwiColors.darkGreen)
+                            .fill(KiwiColors.darkBrown)
                     )
                     .allowsHitTesting(false)
             }
@@ -339,7 +347,7 @@ struct SearchView: View {
 
             if !query.isEmpty {
                 Text("“\(query)”")
-                    .font(.custom("ArialRoundedMTBold", size: 12))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.60))
                     .lineLimit(1)
             }
@@ -358,14 +366,14 @@ struct SearchView: View {
             Spacer()
             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text("Search your saved papers")
-                    .font(.custom("ArialRoundedMTBold", size: 20))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
             } else {
                 Text("No matches")
-                    .font(.custom("ArialRoundedMTBold", size: 20))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
                 Text("Try fewer words or a different phrase.")
-                    .font(.custom("ArialRoundedMTBold", size: 14))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.8))
             }
             Spacer()

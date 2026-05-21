@@ -1,22 +1,43 @@
 import SwiftUI
 import SwiftData
 import LaTeXSwiftUI
+import UIKit
+
+enum ReadingListSort: String, CaseIterable {
+    case recent = "Recent"
+    case title = "Title"
+    case author = "Author"
+}
 
 struct ReadingListView: View {
     @State private var selectedURL: IdentifiableURL?
+    @State private var shareURL: IdentifiableURL?
     @State private var expandedPaperID: Paper.ID?
+    @State private var sortOption: ReadingListSort = .recent
 
     @Query private var papers: [Paper]
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var settingsStore: SettingsStore
 
-    // Saved papers: pinned first, then by date descending
     private var savedPapers: [Paper] {
-        papers
-            .filter { $0.saved }
-            .sorted { a, b in
+        let saved = papers.filter { $0.saved }
+        switch sortOption {
+        case .recent:
+            return saved.sorted { a, b in
                 if a.pinned != b.pinned { return a.pinned && !b.pinned }
-                return a.date > b.date
+                return (a.savedDate ?? a.date) > (b.savedDate ?? b.date)
             }
+        case .title:
+            return saved.sorted { a, b in
+                if a.pinned != b.pinned { return a.pinned && !b.pinned }
+                return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
+            }
+        case .author:
+            return saved.sorted { a, b in
+                if a.pinned != b.pinned { return a.pinned && !b.pinned }
+                return (a.authors.first ?? "").localizedCaseInsensitiveCompare(b.authors.first ?? "") == .orderedAscending
+            }
+        }
     }
 
     var body: some View {
@@ -33,6 +54,10 @@ struct ReadingListView: View {
             row: { paper in
                 paperRow(paper)
                     .contentShape(Rectangle())
+                    .onLongPressGesture {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        shareURL = IdentifiableURL(url: paper.url)
+                    }
                     .onTapGesture {
                         expandedPaperID = (expandedPaperID == paper.id) ? nil : paper.id
                     }
@@ -40,6 +65,7 @@ struct ReadingListView: View {
                         Button(role: .destructive) {
                             paper.saved = false
                             paper.pinned = false
+                            paper.savedDate = nil
                         } label: {
                             Label("Remove", systemImage: "minus")
                         }
@@ -59,6 +85,13 @@ struct ReadingListView: View {
                             Label("arXiv", systemImage: "safari")
                         }
                         .tint(.blue)
+
+                        Button {
+                            selectedURL = IdentifiableURL(url: paper.url.arxivPDF)
+                        } label: {
+                            Label("PDF", systemImage: "doc.text")
+                        }
+                        .tint(.purple)
                     }
             },
             emptyState: { emptyState },
@@ -66,6 +99,10 @@ struct ReadingListView: View {
         )
         .sheet(item: $selectedURL) { wrapper in
             SafariView(url: wrapper.url)
+        }
+        .sheet(item: $shareURL) { wrapper in
+            ShareSheet(items: [wrapper.url])
+                .presentationDetents([.medium])
         }
         .navigationBarBackButtonHidden(true)
     }
@@ -80,9 +117,25 @@ struct ReadingListView: View {
             },
             left: { SideMenuButton() },
             right: {
-                Color.clear
-                    .frame(width: 44, height: 44)
-                    .allowsHitTesting(false)
+                Menu {
+                    ForEach(ReadingListSort.allCases, id: \.self) { option in
+                        Button {
+                            sortOption = option
+                        } label: {
+                            HStack {
+                                Text(option.rawValue)
+                                if sortOption == option {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(KiwiColors.darkBrown)
+                        .frame(width: 44, height: 44)
+                }
             }
         )
     }
@@ -125,9 +178,21 @@ struct ReadingListView: View {
                     }
                 }
 
-                Text(paper.authors.truncatedAuthors())
+                HStack(alignment: .firstTextBaseline) {
+                    KeywordHighlightedText(
+                        text: paper.authors.truncatedAuthors(),
+                        keywords: settingsStore.keywords
+                    )
                     .font(.caption)
-                    .foregroundColor(KiwiColors.darkBrown)
+
+                    Spacer()
+
+                    if let label = daysOnListText(paper) {
+                        Text(label)
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundColor(KiwiColors.darkBrown.opacity(0.55))
+                    }
+                }
             }
 
             if isExpanded {
@@ -141,13 +206,21 @@ struct ReadingListView: View {
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(KiwiColors.darkGreen)
+                            .fill(KiwiColors.darkBrown)
                     )
                     .allowsHitTesting(false)
             }
         }
         .padding(.vertical, 6)
         .listRowBackground(Color.clear)
+    }
+
+    private func daysOnListText(_ paper: Paper) -> String? {
+        guard let savedDate = paper.savedDate else { return nil }
+        let days = Calendar.current.dateComponents([.day], from: savedDate, to: Date()).day ?? 0
+        if days == 0 { return "Added today" }
+        if days == 1 { return "1 day on list" }
+        return "\(days) days on list"
     }
 
     private func badge(_ text: String, color: Color) -> some View {
@@ -162,7 +235,7 @@ struct ReadingListView: View {
             Spacer()
             Text("No papers saved yet…")
                 .foregroundColor(KiwiColors.darkBrown)
-                .font(.custom("ArialRoundedMTBold", size: 18))
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
             Spacer()
         }
         .padding(.horizontal)

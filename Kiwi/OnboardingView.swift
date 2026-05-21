@@ -34,7 +34,7 @@ struct OnboardingView: View {
                             HStack(alignment: .center, spacing: 12) {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("Welcome to")
-                                        .font(.custom("ArialRoundedMTBold", size: 22))
+                                        .font(.system(size: 22, weight: .semibold, design: .rounded))
                                         .foregroundColor(KiwiColors.darkBrown)
 
                                     Text("Kiwi")
@@ -42,7 +42,7 @@ struct OnboardingView: View {
                                         .foregroundColor(KiwiColors.darkBrown)
 
                                     Text("Pick a few arXiv categories to track.")
-                                        .font(.custom("ArialRoundedMTBold", size: 14))
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
                                         .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
                                 }
 
@@ -63,7 +63,7 @@ struct OnboardingView: View {
 
                                 HStack {
                                     Text("\(localSelected.count) selected")
-                                        .font(.custom("ArialRoundedMTBold", size: 14))
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
                                         .foregroundColor(KiwiColors.darkBrown.opacity(0.85))
 
                                     Spacer()
@@ -74,7 +74,7 @@ struct OnboardingView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.9))
-                                    .font(.custom("ArialRoundedMTBold", size: 14))
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
 
                                     Text("·")
                                         .foregroundColor(KiwiColors.darkBrown.opacity(0.35))
@@ -85,7 +85,7 @@ struct OnboardingView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.9))
-                                    .font(.custom("ArialRoundedMTBold", size: 14))
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                                 }
 
                                 ForEach(groupedCategories, id: \.key) { group in
@@ -99,13 +99,13 @@ struct OnboardingView: View {
                                         } label: {
                                             HStack {
                                                 Text(displayName(for: group.key))
-                                                    .font(.custom("ArialRoundedMTBold", size: 15))
+                                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
                                                     .foregroundColor(KiwiColors.darkBrown)
 
                                                 Spacer()
 
                                                 Text("\(group.values.filter { localSelected.contains($0) }.count)")
-                                                    .font(.custom("ArialRoundedMTBold", size: 13))
+                                                    .font(.system(size: 13, weight: .medium, design: .rounded))
                                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
                                             }
                                             .padding(.vertical, 6)
@@ -138,7 +138,7 @@ struct OnboardingView: View {
                             ProgressView().tint(KiwiColors.darkBrown)
                         } else {
                             Text(localSelected.isEmpty ? "Select at least one category" : "Continue")
-                                .font(.custom("ArialRoundedMTBold", size: 16))
+                                .font(.system(size: 16, weight: .semibold, design: .rounded))
                                 .foregroundColor(KiwiColors.darkBrown)
                         }
                         Spacer()
@@ -175,7 +175,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: title.isEmpty ? 0 : 10) {
             if !title.isEmpty {
                 Text(title)
-                    .font(.custom("ArialRoundedMTBold", size: 20))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
             }
             content()
@@ -207,13 +207,13 @@ struct OnboardingView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(long)
-                        .font(.custom("ArialRoundedMTBold", size: 12))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .multilineTextAlignment(.leading)
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
 
                     Text(category.lowercased())
-                        .font(.custom("ArialRoundedMTBold", size: 10))
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundColor((selected ? KiwiColors.creamWhite : KiwiColors.darkBrown).opacity(0.75))
                 }
 
@@ -236,11 +236,11 @@ struct OnboardingView: View {
 
             VStack(spacing: 10) {
                 Text("Getting fresh papers…")
-                    .font(.custom("ArialRoundedMTBold", size: 20))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
 
                 Text("First sync can take a moment.")
-                    .font(.custom("ArialRoundedMTBold", size: 14))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.70))
 
                 ProgressView()

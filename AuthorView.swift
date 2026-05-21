@@ -14,6 +14,8 @@ struct AuthorView: View {
     @State private var expandedPaperID: Paper.ID?
     @State private var selectedURL: IdentifiableURL?
     @State private var shareURL: IdentifiableURL?
+    @State private var matchedAuthors: [String] = []
+    @State private var selectedAuthor: String?
 
     var body: some View {
         PaperScaffold(
@@ -34,6 +36,7 @@ struct AuthorView: View {
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button {
                             paper.saved.toggle()
+                            paper.savedDate = paper.saved ? Date() : nil
                             UINotificationFeedbackGenerator()
                                 .notificationOccurred(paper.saved ? .success : .warning)
                         } label: {
@@ -49,6 +52,13 @@ struct AuthorView: View {
                             Label("arXiv", systemImage: "safari")
                         }
                         .tint(.blue)
+
+                        Button {
+                            selectedURL = IdentifiableURL(url: paper.url.arxivPDF)
+                        } label: {
+                            Label("PDF", systemImage: "doc.text")
+                        }
+                        .tint(.purple)
                     }
             },
             emptyState: { emptyState },
@@ -67,7 +77,7 @@ struct AuthorView: View {
                     ProgressView()
                         .tint(KiwiColors.darkBrown)
                     Text("Fetching more papers…")
-                        .font(.custom("ArialRoundedMTBold", size: 12))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundColor(KiwiColors.darkBrown)
                 }
                 .padding(.horizontal, 12)
@@ -104,7 +114,7 @@ struct AuthorView: View {
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
 
                 TextField("Search by author name…", text: $authorQuery)
-                    .font(.custom("ArialRoundedMTBold", size: 14))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
                     .textInputAutocapitalization(.words)
                     .autocorrectionDisabled(true)
@@ -116,6 +126,8 @@ struct AuthorView: View {
                         authorQuery = ""
                         papers = []
                         hasSearched = false
+                        matchedAuthors = []
+                        selectedAuthor = nil
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(KiwiColors.darkBrown.opacity(0.35))
@@ -135,9 +147,45 @@ struct AuthorView: View {
                     .stroke(KiwiColors.darkBrown.opacity(0.10), lineWidth: 1)
             )
             .padding(.horizontal, 14)
+
+            if matchedAuthors.count > 1 {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Which one?")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundColor(KiwiColors.darkBrown.opacity(0.70))
+                        .padding(.horizontal, 14)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(matchedAuthors, id: \.self) { author in
+                                Button {
+                                    if selectedAuthor == author {
+                                        selectedAuthor = nil
+                                        Task { await performSearch() }
+                                    } else {
+                                        Task { await searchExactAuthor(author) }
+                                    }
+                                } label: {
+                                    Text(author)
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .foregroundColor(selectedAuthor == author ? KiwiColors.creamWhite : KiwiColors.darkBrown)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(selectedAuthor == author ? KiwiColors.darkGreen : KiwiColors.creamWhite.opacity(0.75))
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                    }
+                }
+            }
         }
         .padding(.top, 2)
     }
+
+    @State private var allResults: [Paper] = []
 
     // MARK: - Search
 
@@ -145,25 +193,64 @@ struct AuthorView: View {
         let query = authorQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             papers = []
+            allResults = []
             hasSearched = false
+            matchedAuthors = []
+            selectedAuthor = nil
             return
         }
 
         hasSearched = true
+        selectedAuthor = nil
 
         let local = localPapersByAuthor(query)
-        papers = Array(local.prefix(10))
 
-        if local.count >= 10 { return }
+        var combined = local
+        if local.count < 10 {
+            isLoading = true
+            let manager = NetworkManager(context: modelContext)
+            let fetched = await manager.fetchPapersByAuthor(name: query)
+            isLoading = false
+
+            var byURL: [URL: Paper] = [:]
+            for paper in local + fetched { byURL[paper.url] = paper }
+            combined = Array(byURL.values.sorted { $0.date > $1.date })
+        }
+
+        allResults = combined
+
+        let lowered = query.lowercased()
+        var authorSet: Set<String> = []
+        for paper in combined {
+            for author in paper.authors where author.lowercased().contains(lowered) {
+                authorSet.insert(author)
+            }
+        }
+        matchedAuthors = authorSet.sorted()
+
+        papers = Array(combined.prefix(50))
+    }
+
+    private func searchExactAuthor(_ author: String) async {
+        selectedAuthor = author
 
         isLoading = true
         let manager = NetworkManager(context: modelContext)
-        let fetched = await manager.fetchPapersByAuthor(name: query)
+        let fetched = await manager.fetchPapersByAuthor(name: author, maxResults: 50)
         isLoading = false
+
+        let local = localPapersByAuthor(author).filter { paper in
+            paper.authors.contains { $0 == author }
+        }
 
         var byURL: [URL: Paper] = [:]
         for paper in local + fetched { byURL[paper.url] = paper }
-        papers = Array(byURL.values.sorted { $0.date > $1.date }.prefix(10))
+        let combined = Array(byURL.values
+            .filter { $0.authors.contains(author) }
+            .sorted { $0.date > $1.date })
+
+        allResults = combined
+        papers = Array(combined.prefix(50))
     }
 
     private func localPapersByAuthor(_ name: String) -> [Paper] {
@@ -242,7 +329,7 @@ struct AuthorView: View {
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(KiwiColors.darkGreen)
+                            .fill(KiwiColors.darkBrown)
                     )
                     .allowsHitTesting(false)
             }
@@ -266,24 +353,24 @@ struct AuthorView: View {
                 RefreshingDotsView()
                     .padding(.bottom, 20)
                 Text("Searching arXiv…")
-                    .font(.custom("ArialRoundedMTBold", size: 16))
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
             } else if hasSearched {
                 Text("No papers found")
-                    .font(.custom("ArialRoundedMTBold", size: 20))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
                 Text("Try a different author name.")
-                    .font(.custom("ArialRoundedMTBold", size: 14))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.8))
             } else {
                 Image(systemName: "person.crop.circle")
                     .font(.system(size: 40))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.3))
                 Text("Search for an author")
-                    .font(.custom("ArialRoundedMTBold", size: 20))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
                 Text("Find their latest papers on arXiv.")
-                    .font(.custom("ArialRoundedMTBold", size: 14))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.8))
             }
             Spacer()
@@ -303,7 +390,7 @@ struct AuthorView: View {
 
             if !authorQuery.isEmpty {
                 Text("\"\(authorQuery)\"")
-                    .font(.custom("ArialRoundedMTBold", size: 12))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.60))
                     .lineLimit(1)
             }

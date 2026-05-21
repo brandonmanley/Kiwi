@@ -101,12 +101,34 @@ struct SettingsView: View {
                             }
                         }
                         
+                        // --- Daily papers card ---
+                        settingsCard(title: "Daily papers") {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Days to show")
+                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                        .foregroundColor(KiwiColors.darkBrown)
+                                    Text("Number of days in the daily view (1–21)")
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .foregroundColor(KiwiColors.darkBrown.opacity(0.60))
+                                }
+                                Spacer()
+                                Stepper("\(settingsStore.dailyPapersDays)", value: Binding(
+                                    get: { settingsStore.dailyPapersDays },
+                                    set: { settingsStore.setDailyPapersDays($0) }
+                                ), in: 1...21)
+                                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                .foregroundColor(KiwiColors.darkBrown)
+                                .frame(width: 140)
+                            }
+                        }
+
                         // --- Keywords card ---
                         settingsCard(title: "Keywords") {
                             VStack(alignment: .leading, spacing: 10) {
                                 
                                 Text("Prioritize papers matching these terms in title, authors, or abstract.")
-                                    .font(.custom("ArialRoundedMTBold", size: 12))
+                                    .font(.system(size: 12, weight: .medium, design: .rounded))
                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
                                 
                                 // Input row
@@ -114,7 +136,7 @@ struct SettingsView: View {
                                     TextField("Add keyword", text: $keywordText)
                                         .textInputAutocapitalization(.never)
                                         .autocorrectionDisabled()
-                                        .font(.custom("ArialRoundedMTBold", size: 14))
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
                                         .padding(.vertical, 8)
                                         .padding(.horizontal, 10)
                                         .background(
@@ -147,7 +169,7 @@ struct SettingsView: View {
                                         ForEach(settingsStore.keywords, id: \.self) { kw in
                                             HStack(spacing: 6) {
                                                 Text(kw.lowercased())
-                                                    .font(.custom("ArialRoundedMTBold", size: 12))
+                                                    .font(.system(size: 12, weight: .medium, design: .rounded))
                                                     .foregroundColor(KiwiColors.darkBrown)
 
                                                 Spacer()
@@ -181,7 +203,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 HStack {
                                     Text("\(localSelected.count) selected")
-                                        .font(.custom("ArialRoundedMTBold", size: 14))
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
                                         .foregroundColor(KiwiColors.darkBrown.opacity(0.85))
                                     Spacer()
                                     
@@ -191,7 +213,7 @@ struct SettingsView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.9))
-                                    .font(.custom("ArialRoundedMTBold", size: 14))
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                                     
                                     Text("·")
                                         .foregroundColor(KiwiColors.darkBrown.opacity(0.35))
@@ -202,7 +224,7 @@ struct SettingsView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.9))
-                                    .font(.custom("ArialRoundedMTBold", size: 14))
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                                 }
                                 
                                 ForEach(groupedCategories, id: \.key) { group in
@@ -218,11 +240,11 @@ struct SettingsView: View {
                                         } label: {
                                             HStack {
                                                 Text(displayName(for: group.key))
-                                                    .font(.custom("ArialRoundedMTBold", size: 15))
+                                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
                                                     .foregroundColor(KiwiColors.darkBrown)
                                                 Spacer()
                                                 Text("\(group.values.filter { localSelected.contains($0) }.count)")
-                                                    .font(.custom("ArialRoundedMTBold", size: 13))
+                                                    .font(.system(size: 13, weight: .medium, design: .rounded))
                                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
                                             }
                                             .padding(.vertical, 6)
@@ -250,7 +272,7 @@ struct SettingsView: View {
                                     ProgressView().tint(KiwiColors.darkBrown)
                                 } else {
                                     Text(localSelected.isEmpty ? "Select at least one category" : "Update papers")
-                                        .font(.custom("ArialRoundedMTBold", size: 16))
+                                        .font(.system(size: 16, weight: .semibold, design: .rounded))
                                         .foregroundColor(KiwiColors.darkBrown)
                                 }
                                 Spacer()
@@ -297,7 +319,7 @@ struct SettingsView: View {
     private func settingsCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
-                .font(.custom("ArialRoundedMTBold", size: 20))
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
                 .foregroundColor(KiwiColors.darkBrown)
 
             content()
@@ -317,11 +339,11 @@ struct SettingsView: View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.custom("ArialRoundedMTBold", size: 15))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
 
                 Text(subtitle)
-                    .font(.custom("ArialRoundedMTBold", size: 12))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.60))
             }
             Spacer()
@@ -351,14 +373,14 @@ struct SettingsView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(long)
-                        .font(.custom("ArialRoundedMTBold", size: 12))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .multilineTextAlignment(.leading)
                         .lineLimit(nil)                      // allow wrapping
                         .fixedSize(horizontal: false, vertical: true)
 
                     // Optional: keep the arXiv code visible but subtle
                     Text(category.lowercased())
-                        .font(.custom("ArialRoundedMTBold", size: 10))
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundColor((selected ? KiwiColors.creamWhite : KiwiColors.darkBrown).opacity(0.75))
                 }
 
@@ -442,13 +464,13 @@ struct SettingsView: View {
                     }
 
                     Text("Thanks for testing Kiwi.")
-                        .font(.custom("ArialRoundedMTBold", size: 13))
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundColor(KiwiColors.darkBrown.opacity(0.80))
 
 //                    Divider().opacity(0.25)
 
                     Text(buildString)
-                        .font(.custom("ArialRoundedMTBold", size: 13))
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundColor(KiwiColors.darkBrown.opacity(0.85))
                 }
                 .padding(14)

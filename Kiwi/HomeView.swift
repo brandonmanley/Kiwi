@@ -112,6 +112,7 @@ struct HomeView: View {
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button {
                             paper.saved.toggle()
+                            paper.savedDate = paper.saved ? Date() : nil
                             UINotificationFeedbackGenerator()
                                 .notificationOccurred(paper.saved ? .success : .warning)
                         } label: {
@@ -127,6 +128,13 @@ struct HomeView: View {
                             Label("arXiv", systemImage: "safari")
                         }
                         .tint(.blue)
+
+                        Button {
+                            selectedURL = IdentifiableURL(url: paper.url.arxivPDF)
+                        } label: {
+                            Label("PDF", systemImage: "doc.text")
+                        }
+                        .tint(.purple)
                     }
             },
             emptyState: { emptyState },
@@ -149,7 +157,7 @@ struct HomeView: View {
         .overlay(alignment: .bottom) {
             if showRefreshMessage {
                 Text(refreshMessage)
-                    .font(.custom("ArialRoundedMTBold", size: 14))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -264,7 +272,7 @@ struct HomeView: View {
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(KiwiColors.darkGreen)
+                            .fill(KiwiColors.darkBrown)
                     )
                     .allowsHitTesting(false)
             }
@@ -298,7 +306,7 @@ struct HomeView: View {
                 Spacer(minLength: isRefreshing ? 100 : 140)
 
                 Text("No papers for today yet")
-                    .font(.custom("ArialRoundedMTBold", size: 20))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundColor(KiwiColors.darkBrown)
 
                 Spacer(minLength: 400)
@@ -339,13 +347,14 @@ struct HomeView: View {
         }
 
         let manager = NetworkManager(context: modelContext)
+        let result = await manager.syncPapers(for: categories)
 
-        let beforeCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
-        await manager.syncPapers(for: categories)
-        let afterCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
-
-        let delta = max(afterCount - beforeCount, 0)
-        flashRefreshMessage(delta > 0 ? "Added \(delta) papers!" : "No new papers to add")
+        guard !result.cancelled else { return }
+        if result.added > 0 {
+            flashRefreshMessage("Added \(result.added) papers!")
+        } else {
+            flashRefreshMessage("Up to date — \(NetworkManager.friendlyNextAnnouncement())")
+        }
     }
 
     private func flashRefreshMessage(_ message: String) {

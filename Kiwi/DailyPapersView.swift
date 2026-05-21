@@ -4,9 +4,15 @@ import SwiftData
 struct DailyPapersView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var settingsStore: SettingsStore
+    @EnvironmentObject private var uiState: KiwiUIState
 
     @Query(sort: \Paper.date, order: .reverse)
     private var papers: [Paper]
+
+    // SwiftData @Query is reactive at the model level — this guarantees the view
+    // re-renders when dailyPapersDays changes, independent of SettingsStore.
+    @Query private var userSettingsList: [UserSettings]
+    private var dailyPapersDays: Int { userSettingsList.first?.dailyPapersDays ?? 7 }
 
     @State private var isRefreshing = false
 
@@ -16,10 +22,9 @@ struct DailyPapersView: View {
         return cal
     }()
 
-    // MARK: - Group papers by day (last 7 days only)
     private var days: [(day: Date, papers: [Paper])] {
         let cal = Self.dayCalendar
-        let cutoff = cal.startOfDay(for: cal.date(byAdding: .day, value: -7, to: Date()) ?? Date())
+        let cutoff = cal.startOfDay(for: cal.date(byAdding: .day, value: -(dailyPapersDays - 1), to: Date()) ?? Date())
         let grouped = Dictionary(grouping: papers.filter { $0.date >= cutoff }) { cal.startOfDay(for: $0.date) }
         return grouped
             .map { (day: $0.key, papers: $0.value) }
@@ -34,9 +39,18 @@ struct DailyPapersView: View {
 
     private func refreshDailyPapers() async {
         let categories = settingsStore.selectedCategories
-        guard !categories.isEmpty else { return }
+        guard !categories.isEmpty else {
+            uiState.flashRefreshMessage("Choose categories in Settings")
+            return
+        }
         let manager = NetworkManager(context: modelContext)
-        await manager.syncPapers(for: categories)
+        let result = await manager.syncPapers(for: categories)
+        guard !result.cancelled else { return }
+        if result.added > 0 {
+            uiState.flashRefreshMessage("Added \(result.added) papers!")
+        } else {
+            uiState.flashRefreshMessage("Up to date — \(NetworkManager.friendlyNextAnnouncement())")
+        }
     }
 
     var body: some View {
@@ -56,17 +70,31 @@ struct DailyPapersView: View {
                 }
 
                 if days.isEmpty {
-                    VStack(spacing: 10) {
-                        Spacer()
-                        Text("No papers to show")
-                            .font(.custom("ArialRoundedMTBold", size: 20))
-                            .foregroundColor(KiwiColors.darkBrown)
-                        Text("Pull to refresh, or update categories in Settings.")
-                            .font(.custom("ArialRoundedMTBold", size: 14))
-                            .foregroundColor(KiwiColors.darkBrown.opacity(0.75))
-                        Spacer()
+                    ScrollView {
+                        VStack(spacing: 10) {
+                            if isRefreshing {
+                                RefreshingDotsView()
+                                    .padding(.top, 40)
+                            }
+                            Spacer(minLength: isRefreshing ? 100 : 140)
+                            Text("No papers to show")
+                                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                                .foregroundColor(KiwiColors.darkBrown)
+                            Text("Pull to refresh, or update categories in Settings.")
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                .foregroundColor(KiwiColors.darkBrown.opacity(0.75))
+                            Spacer(minLength: 400)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal)
                     }
-                    .padding(.horizontal)
+                    .scrollIndicators(.hidden)
+                    .refreshable {
+                        isRefreshing = true
+                        await refreshDailyPapers()
+                        isRefreshing = false
+                    }
+                    .tint(.clear)
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 14) {
@@ -138,15 +166,21 @@ private struct DayShelfRow: View {
                         .foregroundColor(KiwiColors.darkBrown)
 
                     Text(day.formatted(.dateTime.month(.abbreviated).day().year()))
-                        .font(.custom("ArialRoundedMTBold", size: 12))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundColor(KiwiColors.darkBrown.opacity(0.70))
                 }
 
                 Spacer()
 
-                Text("\(paperCount) papers (\(triageEstimate))")
-                    .font(.custom("Pulang", size: 14))
-                    .foregroundColor(KiwiColors.darkBrown.opacity(clicked ? 0.65 : 0.90))
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(paperCount) papers")
+                        .font(.custom("Pulang", size: 16))
+                        .foregroundColor(KiwiColors.darkBrown.opacity(clicked ? 0.65 : 0.90))
+
+                    Text(triageEstimate)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundColor(KiwiColors.darkBrown.opacity(0.70))
+                }
             }
         }
         .padding(.vertical, 12)

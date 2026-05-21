@@ -58,7 +58,7 @@ struct RootView: View {
                         Image(systemName: "wifi.slash")
                             .font(.system(size: 12))
                         Text("No connection")
-                            .font(.custom("ArialRoundedMTBold", size: 12))
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
                     }
                     .foregroundColor(KiwiColors.creamWhite)
                     .padding(.horizontal, 14)
@@ -68,9 +68,38 @@ struct RootView: View {
                     )
                     .padding(.top, 54)
                     .transition(.move(edge: .top).combined(with: .opacity))
+                } else if uiState.isRefreshing {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .tint(KiwiColors.creamWhite)
+                            .scaleEffect(0.7)
+                        Text("Fetching latest papers…")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                    }
+                    .foregroundColor(KiwiColors.creamWhite)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        Capsule().fill(KiwiColors.darkGreen.opacity(0.92))
+                    )
+                    .padding(.top, 54)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                } else if let message = uiState.refreshMessage {
+                    Text(message)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundColor(KiwiColors.creamWhite)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(
+                            Capsule().fill(KiwiColors.darkBrown.opacity(0.85))
+                        )
+                        .padding(.top, 54)
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
             .animation(.easeInOut(duration: 0.3), value: uiState.isConnected)
+            .animation(.easeInOut(duration: 0.3), value: uiState.isRefreshing)
+            .animation(.easeInOut(duration: 0.3), value: uiState.refreshMessage)
         }
         .background(KiwiColors.lightGreen.ignoresSafeArea())
     }

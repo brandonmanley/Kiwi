@@ -23,6 +23,7 @@ class Paper {
     var isCrosslist: Bool
     var saved: Bool = false
     var pinned: Bool = false
+    var savedDate: Date?
     
     init(title: String, authors: [String], abstract: String, url: URL, categories: [String],
          primaryCategory: String, date: Date, isUpdate: Bool, isCrosslist: Bool) {

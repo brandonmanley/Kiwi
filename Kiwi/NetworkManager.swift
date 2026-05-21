@@ -207,8 +207,13 @@ private enum ArxivFetcher {
             let query = "https://export.arxiv.org/api/query?search_query=cat:\(category)&start=\(start)&max_results=\(batchLimit)&sortBy=submittedDate&sortOrder=descending"
             guard let url = URL(string: query) else { break }
 
+            var request = URLRequest(url: url)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                let (data, _) = try await URLSession.shared.data(for: request)
                 let urlsBefore = Set(accumulated.keys)
 
                 let pagePapers = ArxivPageParser().parse(data)
@@ -249,8 +254,13 @@ private enum ArxivFetcher {
 
         guard let url = components.url else { return [:] }
 
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await URLSession.shared.data(for: request)
             return ArxivPageParser().parse(data)
         } catch {
             #if DEBUG
@@ -340,12 +350,18 @@ final class NetworkManager {
         return result.sorted { $0.date > $1.date }
     }
 
+    struct SyncResult {
+        let added: Int
+        let cancelled: Bool
+    }
+
+    @discardableResult
     func syncPapers(
         for categories: [String],
         trackedCategories: [String]? = nil,
         maxResultsPerCategory: Int = 500,
-        lookbackDays: Int = 10
-    ) async {
+        lookbackDays: Int = 30
+    ) async -> SyncResult {
         Self.currentSyncGeneration += 1
         let myGeneration = Self.currentSyncGeneration
 
@@ -362,15 +378,71 @@ final class NetworkManager {
             #endif
         }
 
+        let beforeCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
+
         let fetched = await ArxivFetcher.fetchAll(
             categories: categories,
             maxPerCategory: maxResultsPerCategory,
             lookbackDays: lookbackDays
         )
 
-        guard Self.currentSyncGeneration == myGeneration else { return }
+        guard Self.currentSyncGeneration == myGeneration else {
+            return SyncResult(added: 0, cancelled: true)
+        }
 
         synchronizeWithStorage(fetched, trackedCategories: tracked, lookbackDays: lookbackDays)
+
+        let afterCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
+        return SyncResult(added: max(afterCount - beforeCount, 0), cancelled: false)
+    }
+
+    // MARK: - Next announcement time (Mon-Fri 20:00 ET)
+
+    nonisolated static func nextAnnouncement(after date: Date = Date()) -> Date {
+        let etZone = TimeZone(identifier: "America/New_York")!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = etZone
+
+        let weekday = calendar.component(.weekday, from: date)
+        let hour = calendar.component(.hour, from: date)
+        let isBusinessDay = (2...6).contains(weekday)
+
+        if isBusinessDay && hour < 20,
+           let today8pm = calendar.date(bySettingHour: 20, minute: 0, second: 0, of: date) {
+            return today8pm
+        }
+
+        var next = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))!
+        while !(2...6).contains(calendar.component(.weekday, from: next)) {
+            next = calendar.date(byAdding: .day, value: 1, to: next)!
+        }
+        return calendar.date(bySettingHour: 20, minute: 0, second: 0, of: next) ?? next
+    }
+
+    nonisolated static func friendlyNextAnnouncement(from date: Date = Date()) -> String {
+        let next = nextAnnouncement(after: date)
+        let etZone = TimeZone(identifier: "America/New_York")!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = etZone
+
+        let nowDay = calendar.startOfDay(for: date)
+        let nextDay = calendar.startOfDay(for: next)
+        let dayDiff = calendar.dateComponents([.day], from: nowDay, to: nextDay).day ?? 0
+
+        let timeFormatter = DateFormatter()
+        timeFormatter.timeZone = etZone
+        timeFormatter.dateFormat = "h a"
+        let timeString = timeFormatter.string(from: next)
+
+        switch dayDiff {
+        case 0: return "next batch \(timeString) ET"
+        case 1: return "next batch tomorrow \(timeString) ET"
+        default:
+            let weekdayFormatter = DateFormatter()
+            weekdayFormatter.timeZone = etZone
+            weekdayFormatter.dateFormat = "EEEE"
+            return "next batch \(weekdayFormatter.string(from: next)) \(timeString) ET"
+        }
     }
 
     // MARK: - Pruning
@@ -482,40 +554,27 @@ final class NetworkManager {
         guard let etDate = calendar.date(from: comps) else { return submissionDate }
 
         let hour = comps.hour ?? 0
-        let weekday = calendar.component(.weekday, from: etDate)
+        let weekday = calendar.component(.weekday, from: etDate) // 1=Sun … 7=Sat
+        let isBusinessDay = (2...6).contains(weekday)
 
-        var announceDate: Date?
-
-        switch weekday {
-        case 2...4: // Mon-Wed
-            announceDate = hour < 14
-                ? calendar.date(bySettingHour: 20, minute: 0, second: 0, of: etDate)
-                : calendar.date(byAdding: .day, value: 1, to: calendar.date(bySettingHour: 20, minute: 0, second: 0, of: etDate)!)
-        case 5: // Thu
-            announceDate = hour < 14
-                ? calendar.date(bySettingHour: 20, minute: 0, second: 0, of: etDate)
-                : calendar.nextDate(after: etDate, matching: DateComponents(weekday: 1), matchingPolicy: .nextTime).flatMap {
-                    calendar.date(bySettingHour: 20, minute: 0, second: 0, of: $0)
-                }
-        case 6, 7: // Fri/Sat -> next Monday
-            announceDate = calendar.nextDate(after: etDate, matching: DateComponents(weekday: 2), matchingPolicy: .nextTime).flatMap {
-                calendar.date(bySettingHour: 20, minute: 0, second: 0, of: $0)
-            }
-        case 1: // Sunday
-            announceDate = hour < 14
-                ? calendar.date(bySettingHour: 20, minute: 0, second: 0, of: etDate)
-                : calendar.nextDate(after: etDate, matching: DateComponents(weekday: 2), matchingPolicy: .nextTime).flatMap {
-                    calendar.date(bySettingHour: 20, minute: 0, second: 0, of: $0)
-                }
-        default:
-            announceDate = etDate
+        // Step 1: announcement day (papers appear at 20:00 ET that evening)
+        let announceDay: Date
+        if isBusinessDay && hour < 14 {
+            announceDay = etDate
+        } else {
+            announceDay = Self.nextBusinessDay(after: etDate, calendar: calendar)
         }
 
-        if let a = announceDate,
-           let shifted = calendar.date(byAdding: .day, value: 1, to: a) {
-            announceDate = shifted
-        }
+        // Step 2: listing date = next business day after announcement
+        let listingDate = Self.nextBusinessDay(after: announceDay, calendar: calendar)
+        return calendar.startOfDay(for: listingDate)
+    }
 
-        return announceDate ?? submissionDate
+    private nonisolated static func nextBusinessDay(after date: Date, calendar: Calendar) -> Date {
+        var next = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))!
+        while !(2...6).contains(calendar.component(.weekday, from: next)) {
+            next = calendar.date(byAdding: .day, value: 1, to: next)!
+        }
+        return next
     }
 }

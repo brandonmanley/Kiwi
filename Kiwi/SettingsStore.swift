@@ -167,3 +167,14 @@ extension SettingsStore {
         .sorted()
     }
 }
+
+extension SettingsStore {
+    var dailyPapersDays: Int { settings.dailyPapersDays }
+
+    func setDailyPapersDays(_ days: Int) {
+        let clamped = max(1, min(21, days))
+        guard clamped != settings.dailyPapersDays else { return }
+        settings.dailyPapersDays = clamped
+        persist("setDailyPapersDays")
+    }
+}

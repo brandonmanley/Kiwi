@@ -1,10 +1,13 @@
 import SwiftUI
+import SwiftData
 import UIKit
 
 struct SideMenuOverlay: View {
     @EnvironmentObject private var uiState: KiwiUIState
     @EnvironmentObject private var router: KiwiRouter
-    
+    @EnvironmentObject private var settingsStore: SettingsStore
+    @Environment(\.modelContext) private var modelContext
+
     @State private var kiwiWiggle: Double = 0
 
     private let menuWidth: CGFloat = 260
@@ -146,6 +149,24 @@ struct SideMenuOverlay: View {
                 Spacer()
 
                 Button {
+                    close(animated: true)
+                    triggerRefresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 22, height: 22)
+                        .foregroundColor(KiwiColors.darkBrown)
+                        .padding(12)
+                        .background(Circle().fill(KiwiColors.darkGreen))
+                        .opacity(uiState.isRefreshing ? 0.5 : 1.0)
+                }
+                .buttonStyle(.plain)
+                .disabled(uiState.isRefreshing)
+
+                Spacer()
+
+                Button {
                     router.go(.settings)
                     close(animated: false)
                 } label: {
@@ -174,7 +195,7 @@ struct SideMenuOverlay: View {
                 .frame(width: 22)
 
             Text(title)
-                .font(.custom("ArialRoundedMTBold", size: 18))
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
         }
         .foregroundColor(KiwiColors.darkBrown)
         .padding(.vertical, 10)
@@ -200,6 +221,28 @@ struct SideMenuOverlay: View {
             }
         } else {
             uiState.isMenuOpen = false
+        }
+    }
+
+    private func triggerRefresh() {
+        guard !uiState.isRefreshing else { return }
+        let categories = settingsStore.selectedCategories
+        guard !categories.isEmpty else {
+            uiState.flashRefreshMessage("Choose categories in Settings")
+            return
+        }
+
+        uiState.isRefreshing = true
+        Task {
+            let manager = NetworkManager(context: modelContext)
+            let result = await manager.syncPapers(for: categories)
+            uiState.isRefreshing = false
+            guard !result.cancelled else { return }
+            if result.added > 0 {
+                uiState.flashRefreshMessage("Added \(result.added) papers!")
+            } else {
+                uiState.flashRefreshMessage("Up to date — \(NetworkManager.friendlyNextAnnouncement())")
+            }
         }
     }
 

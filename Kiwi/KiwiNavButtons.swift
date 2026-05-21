@@ -27,7 +27,7 @@ struct RefreshingDotsView: View {
 
     var body: some View {
         Text(String(repeating: ".", count: dotCount))
-            .font(.custom("ArialRoundedMTBold", size: 28))
+            .font(.system(size: 28, weight: .semibold, design: .rounded))
             .foregroundColor(KiwiColors.darkBrown)
             .frame(width: 40)
             .task {

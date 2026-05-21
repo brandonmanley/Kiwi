@@ -1,5 +1,11 @@
 import SwiftUI
 
+private struct ScrollMetrics: Equatable {
+    var offset: CGFloat
+    var contentHeight: CGFloat
+    var containerHeight: CGFloat
+}
+
 struct PaperScaffold<
     Background: View,
     Header: View,
@@ -17,6 +23,7 @@ struct PaperScaffold<
     @ViewBuilder let bottomOverlay: () -> BottomOverlay
 
     @State private var scrollProgress: CGFloat = 0
+    @State private var lastMetrics: ScrollMetrics = ScrollMetrics(offset: 0, contentHeight: 0, containerHeight: 0)
 
     var body: some View {
         ZStack {
@@ -36,6 +43,7 @@ struct PaperScaffold<
                             Rectangle()
                                 .fill(KiwiColors.darkGreen)
                                 .frame(width: geo.size.width * scrollProgress)
+                                .animation(.easeOut(duration: 0.15), value: scrollProgress)
                         }
                     }
                     .frame(height: 3)
@@ -46,12 +54,14 @@ struct PaperScaffold<
                     }
                     .scrollContentBackground(.hidden)
                     .listStyle(.plain)
-                    .onScrollGeometryChange(for: CGFloat.self) { geo in
-                        let scrollable = geo.contentSize.height - geo.containerSize.height
-                        guard scrollable > 0 else { return 0 }
-                        return min(max(geo.contentOffset.y / scrollable, 0), 1)
-                    } action: { _, newValue in
-                        scrollProgress = newValue
+                    .onScrollGeometryChange(for: ScrollMetrics.self) { geo in
+                        ScrollMetrics(
+                            offset: geo.contentOffset.y,
+                            contentHeight: geo.contentSize.height,
+                            containerHeight: geo.containerSize.height
+                        )
+                    } action: { _, new in
+                        updateScrollProgress(new)
                     }
                 }
             }
@@ -60,5 +70,24 @@ struct PaperScaffold<
                 bottomOverlay()
             }
         }
+    }
+
+    private func updateScrollProgress(_ new: ScrollMetrics) {
+        // If the content size changed but offset did not, the user is expanding/
+        // collapsing a row — keep the progress bar where it is to avoid jumps.
+        let contentResized = abs(new.contentHeight - lastMetrics.contentHeight) > 1
+            || abs(new.containerHeight - lastMetrics.containerHeight) > 1
+        let offsetChanged = abs(new.offset - lastMetrics.offset) > 0.5
+
+        lastMetrics = new
+
+        guard offsetChanged || !contentResized else { return }
+
+        let scrollable = new.contentHeight - new.containerHeight
+        guard scrollable > 0 else {
+            scrollProgress = 0
+            return
+        }
+        scrollProgress = min(max(new.offset / scrollable, 0), 1)
     }
 }
