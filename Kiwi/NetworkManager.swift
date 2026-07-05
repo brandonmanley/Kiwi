@@ -163,42 +163,52 @@ private final class ArxivPageParser: NSObject, XMLParserDelegate {
 
 private enum ArxivFetcher {
 
+    struct FetchResult {
+        var papers: [URL: ParsedPaper]
+        // True if at least one category produced a successful HTTP response.
+        // Lets callers distinguish "arXiv had nothing new" from "network completely failed".
+        var anySucceeded: Bool
+    }
+
     static func fetchAll(
         categories: [String],
         maxPerCategory: Int = 500,
         lookbackDays: Int = 10
-    ) async -> [URL: ParsedPaper] {
+    ) async -> FetchResult {
         let maxConcurrent = 4
         var merged: [URL: ParsedPaper] = [:]
+        var anySucceeded = false
 
         for batchStart in stride(from: 0, to: categories.count, by: maxConcurrent) {
             let batchEnd = min(batchStart + maxConcurrent, categories.count)
             let batch = Array(categories[batchStart..<batchEnd])
 
-            await withTaskGroup(of: [URL: ParsedPaper].self) { group in
+            await withTaskGroup(of: (papers: [URL: ParsedPaper], succeeded: Bool).self) { group in
                 for category in batch {
                     group.addTask {
                         await fetchCategory(category, maxResults: maxPerCategory, lookbackDays: lookbackDays)
                     }
                 }
                 for await result in group {
-                    mergePapers(result, into: &merged)
+                    mergePapers(result.papers, into: &merged)
+                    if result.succeeded { anySucceeded = true }
                 }
             }
         }
 
-        return merged
+        return FetchResult(papers: merged, anySucceeded: anySucceeded)
     }
 
     private static func fetchCategory(
         _ category: String,
         maxResults: Int,
         lookbackDays: Int
-    ) async -> [URL: ParsedPaper] {
+    ) async -> (papers: [URL: ParsedPaper], succeeded: Bool) {
         let batchSize = 100
         var start = 0
         let cutoff = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: Date()) ?? Date()
         var accumulated: [URL: ParsedPaper] = [:]
+        var succeeded = false
 
         while start < maxResults {
             guard !Task.isCancelled else { break }
@@ -211,9 +221,11 @@ private enum ArxivFetcher {
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
             request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+            request.timeoutInterval = 20
 
             do {
                 let (data, _) = try await URLSession.shared.data(for: request)
+                succeeded = true
                 let urlsBefore = Set(accumulated.keys)
 
                 let pagePapers = ArxivPageParser().parse(data)
@@ -236,16 +248,20 @@ private enum ArxivFetcher {
             start += batchSize
         }
 
-        return accumulated
+        return (accumulated, succeeded)
     }
 
-    static func fetchByAuthor(name: String, maxResults: Int = 10) async -> [URL: ParsedPaper] {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Queries by *last name only* on purpose. arXiv stores authors as
+    // "Lastname, Firstname", so a quoted full-name search misses common
+    // first-name variants ("Ed Witten" vs "Edward Witten"). We cast a wide
+    // net here and let the caller filter on the client side.
+    static func fetchByAuthor(lastName: String, maxResults: Int = 100) async -> [URL: ParsedPaper] {
+        let trimmed = lastName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [:] }
 
         var components = URLComponents(string: "https://export.arxiv.org/api/query")!
         components.queryItems = [
-            URLQueryItem(name: "search_query", value: "au:\"\(trimmed)\""),
+            URLQueryItem(name: "search_query", value: "au:\(trimmed)"),
             URLQueryItem(name: "start", value: "0"),
             URLQueryItem(name: "max_results", value: "\(maxResults)"),
             URLQueryItem(name: "sortBy", value: "submittedDate"),
@@ -258,13 +274,15 @@ private enum ArxivFetcher {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+        // Bounded timeout so the UI can't hang for the URLSession default (60s).
+        request.timeoutInterval = 15
 
         do {
             let (data, _) = try await URLSession.shared.data(for: request)
             return ArxivPageParser().parse(data)
         } catch {
             #if DEBUG
-            print("⚠️ Failed to fetch papers for author \(name): \(error)")
+            print("⚠️ Failed to fetch papers for last name \(trimmed): \(error)")
             #endif
             return [:]
         }
@@ -301,7 +319,6 @@ private enum ArxivFetcher {
 final class NetworkManager {
 
     private let modelContext: ModelContext
-    private static var currentSyncGeneration: Int = 0
 
     init(context: ModelContext) {
         self.modelContext = context
@@ -309,8 +326,19 @@ final class NetworkManager {
 
     // MARK: - Public API
 
-    func fetchPapersByAuthor(name: String, maxResults: Int = 10) async -> [Paper] {
-        let fetched = await ArxivFetcher.fetchByAuthor(name: name, maxResults: maxResults)
+    func fetchPapersByAuthor(name: String, maxResults: Int = 100) async -> [Paper] {
+        guard let target = AuthorName.parse(name) else { return [] }
+
+        let fetched = await ArxivFetcher.fetchByAuthor(lastName: target.lastName, maxResults: maxResults)
+
+        // Filter by AuthorName matching so "Ed Witten" and "Edward Witten" map
+        // to the same set of papers.
+        let matching = fetched.values.filter { parsed in
+            parsed.authors.contains { authorString in
+                guard let parsedAuthor = AuthorName.parse(authorString) else { return false }
+                return target.matches(parsedAuthor)
+            }
+        }
 
         var result: [Paper] = []
 
@@ -318,7 +346,7 @@ final class NetworkManager {
             let stored = try modelContext.fetch(FetchDescriptor<Paper>())
             let storedByURL = Dictionary(uniqueKeysWithValues: stored.map { ($0.url, $0) })
 
-            for parsed in fetched.values {
+            for parsed in matching {
                 guard let url = parsed.url else { continue }
 
                 if let existing = storedByURL[url] {
@@ -352,7 +380,7 @@ final class NetworkManager {
 
     struct SyncResult {
         let added: Int
-        let cancelled: Bool
+        let failed: Bool
     }
 
     @discardableResult
@@ -362,9 +390,6 @@ final class NetworkManager {
         maxResultsPerCategory: Int = 500,
         lookbackDays: Int = 30
     ) async -> SyncResult {
-        Self.currentSyncGeneration += 1
-        let myGeneration = Self.currentSyncGeneration
-
         let tracked = Set((trackedCategories ?? categories).map { $0.lowercased() })
 
         do {
@@ -378,22 +403,20 @@ final class NetworkManager {
             #endif
         }
 
-        let beforeCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
-
         let fetched = await ArxivFetcher.fetchAll(
             categories: categories,
             maxPerCategory: maxResultsPerCategory,
             lookbackDays: lookbackDays
         )
 
-        guard Self.currentSyncGeneration == myGeneration else {
-            return SyncResult(added: 0, cancelled: true)
+        // If no category produced a successful HTTP response, treat as failed
+        // so callers don't silently report "Up to date" after a network outage.
+        guard fetched.anySucceeded else {
+            return SyncResult(added: 0, failed: true)
         }
 
-        synchronizeWithStorage(fetched, trackedCategories: tracked, lookbackDays: lookbackDays)
-
-        let afterCount = (try? modelContext.fetch(FetchDescriptor<Paper>()).count) ?? 0
-        return SyncResult(added: max(afterCount - beforeCount, 0), cancelled: false)
+        let added = synchronizeWithStorage(fetched.papers, trackedCategories: tracked, lookbackDays: lookbackDays)
+        return SyncResult(added: added, failed: false)
     }
 
     // MARK: - Next announcement time (Mon-Fri 20:00 ET)
@@ -471,11 +494,14 @@ final class NetworkManager {
 
     // MARK: - Storage sync
 
+    @discardableResult
     private func synchronizeWithStorage(
         _ fetchedPapers: [URL: ParsedPaper],
         trackedCategories: Set<String>,
         lookbackDays: Int
-    ) {
+    ) -> Int {
+        var insertedCount = 0
+
         do {
             let cutoff = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: Date()) ?? Date()
 
@@ -523,6 +549,7 @@ final class NetworkManager {
 
                     modelContext.insert(paper)
                     stored.append(paper)
+                    insertedCount += 1
                 }
             }
 
@@ -533,7 +560,7 @@ final class NetworkManager {
             try modelContext.save()
 
             #if DEBUG
-            print("✅ Synced papers. Total stored: \(stored.count)")
+            print("✅ Synced papers. Inserted: \(insertedCount). Total stored: \(stored.count)")
             #endif
 
         } catch {
@@ -541,6 +568,8 @@ final class NetworkManager {
             print("⚠️ SwiftData sync failed: \(error)")
             #endif
         }
+
+        return insertedCount
     }
 
     // MARK: - Announcement date (nonisolated for testability)

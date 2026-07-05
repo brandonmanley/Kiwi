@@ -6,6 +6,7 @@ struct SideMenuOverlay: View {
     @EnvironmentObject private var uiState: KiwiUIState
     @EnvironmentObject private var router: KiwiRouter
     @EnvironmentObject private var settingsStore: SettingsStore
+    @EnvironmentObject private var syncService: PaperSyncService
     @Environment(\.modelContext) private var modelContext
 
     @State private var kiwiWiggle: Double = 0
@@ -225,24 +226,10 @@ struct SideMenuOverlay: View {
     }
 
     private func triggerRefresh() {
-        guard !uiState.isRefreshing else { return }
         let categories = settingsStore.selectedCategories
-        guard !categories.isEmpty else {
-            uiState.flashRefreshMessage("Choose categories in Settings")
-            return
-        }
-
-        uiState.isRefreshing = true
+        let context = modelContext
         Task {
-            let manager = NetworkManager(context: modelContext)
-            let result = await manager.syncPapers(for: categories)
-            uiState.isRefreshing = false
-            guard !result.cancelled else { return }
-            if result.added > 0 {
-                uiState.flashRefreshMessage("Added \(result.added) papers!")
-            } else {
-                uiState.flashRefreshMessage("Up to date — \(NetworkManager.friendlyNextAnnouncement())")
-            }
+            await syncService.sync(context: context, categories: categories)
         }
     }
 

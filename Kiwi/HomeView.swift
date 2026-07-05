@@ -7,6 +7,8 @@ struct HomeView: View {
 
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var settingsStore: SettingsStore
+    @EnvironmentObject private var uiState: KiwiUIState
+    @EnvironmentObject private var syncService: PaperSyncService
 
     @State private var selectedURL: IdentifiableURL?
     @State private var shareURL: IdentifiableURL?
@@ -14,12 +16,7 @@ struct HomeView: View {
 
     @State private var activeFilter: PaperFilter = .new
 
-    @State private var hasFetchedToday = false
-    private let lastFetchKey = "lastArxivFetchDate"
-    @State private var refreshMessage: String = ""
-    @State private var showRefreshMessage = false
-    @State private var refreshMessageTask: Task<Void, Never>?
-    @State private var isRefreshing = false
+    @State private var didAttemptAutoFetch = false
 
     enum PaperFilter: String, CaseIterable {
         case new = "New"
@@ -154,21 +151,6 @@ struct HomeView: View {
                 .presentationDetents([.medium])
         }
         .navigationBarBackButtonHidden(true)
-        .overlay(alignment: .bottom) {
-            if showRefreshMessage {
-                Text(refreshMessage)
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    .foregroundColor(KiwiColors.darkBrown)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(KiwiColors.creamWhite.opacity(0.85))
-                    )
-                    .padding(.bottom, 14)
-                    .transition(.opacity)
-            }
-        }
     }
 
     // MARK: - Bottom filter bar (material + transparent)
@@ -298,12 +280,12 @@ struct HomeView: View {
     private var emptyState: some View {
         ScrollView {
             VStack(spacing: 10) {
-                if isRefreshing {
+                if uiState.isRefreshing {
                     RefreshingDotsView()
                         .padding(.top, 40)
                 }
 
-                Spacer(minLength: isRefreshing ? 100 : 140)
+                Spacer(minLength: uiState.isRefreshing ? 100 : 140)
 
                 Text("No papers for today yet")
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
@@ -316,55 +298,28 @@ struct HomeView: View {
         }
         .scrollIndicators(.hidden)
         .refreshable {
-            isRefreshing = true
             await fetchLatestPapers()
-            isRefreshing = false
         }
         .tint(.clear)
     }
 
     // MARK: - Fetch logic
+
     private func autoFetchIfNeeded() async {
-        guard !hasFetchedToday else { return }
-
-        let today = Calendar.current.startOfDay(for: Date())
-        let lastFetchDay = (UserDefaults.standard.object(forKey: lastFetchKey) as? Date)
-            .map(Calendar.current.startOfDay)
-
-        if lastFetchDay == nil || lastFetchDay! < today {
-            await fetchLatestPapers()
-            UserDefaults.standard.set(Date(), forKey: lastFetchKey)
-        }
-
-        hasFetchedToday = true
+        guard !didAttemptAutoFetch else { return }
+        didAttemptAutoFetch = true
+        await syncService.autoSync(
+            context: modelContext,
+            categories: settingsStore.selectedCategories
+        )
     }
 
     private func fetchLatestPapers() async {
-        let categories = settingsStore.selectedCategories
-        guard !categories.isEmpty else {
-            flashRefreshMessage("Choose categories in Settings")
-            return
-        }
-
-        let manager = NetworkManager(context: modelContext)
-        let result = await manager.syncPapers(for: categories)
-
-        guard !result.cancelled else { return }
-        if result.added > 0 {
-            flashRefreshMessage("Added \(result.added) papers!")
-        } else {
-            flashRefreshMessage("Up to date — \(NetworkManager.friendlyNextAnnouncement())")
-        }
-    }
-
-    private func flashRefreshMessage(_ message: String) {
-        refreshMessageTask?.cancel()
-        refreshMessage = message
-        withAnimation { showRefreshMessage = true }
-        refreshMessageTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            guard !Task.isCancelled else { return }
-            withAnimation { showRefreshMessage = false }
-        }
+        // Sync runs on a service-owned unstructured Task — it can't be killed
+        // by view dismissal or SwiftUI cancelling the .refreshable closure.
+        await syncService.sync(
+            context: modelContext,
+            categories: settingsStore.selectedCategories
+        )
     }
 }

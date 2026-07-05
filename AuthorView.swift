@@ -16,6 +16,7 @@ struct AuthorView: View {
     @State private var shareURL: IdentifiableURL?
     @State private var matchedAuthors: [String] = []
     @State private var selectedAuthor: String?
+    @State private var searchTask: Task<Void, Never>?
 
     var body: some View {
         PaperScaffold(
@@ -119,10 +120,13 @@ struct AuthorView: View {
                     .textInputAutocapitalization(.words)
                     .autocorrectionDisabled(true)
                     .submitLabel(.search)
-                    .onSubmit { Task { await performSearch() } }
+                    .onSubmit { startSearch() }
 
                 if !authorQuery.isEmpty {
                     Button {
+                        searchTask?.cancel()
+                        searchTask = nil
+                        isLoading = false
                         authorQuery = ""
                         papers = []
                         hasSearched = false
@@ -161,9 +165,9 @@ struct AuthorView: View {
                                 Button {
                                     if selectedAuthor == author {
                                         selectedAuthor = nil
-                                        Task { await performSearch() }
+                                        startSearch()
                                     } else {
-                                        Task { await searchExactAuthor(author) }
+                                        startExactSearch(author)
                                     }
                                 } label: {
                                     Text(author)
@@ -189,9 +193,21 @@ struct AuthorView: View {
 
     // MARK: - Search
 
+    // Replaces the inline `Task { await performSearch() }` pattern so a new
+    // submit cancels the previous in-flight request instead of stacking.
+    private func startSearch() {
+        searchTask?.cancel()
+        searchTask = Task { await performSearch() }
+    }
+
+    private func startExactSearch(_ author: String) {
+        searchTask?.cancel()
+        searchTask = Task { await searchExactAuthor(author) }
+    }
+
     private func performSearch() async {
         let query = authorQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
+        guard let target = AuthorName.parse(query) else {
             papers = []
             allResults = []
             hasSearched = false
@@ -203,14 +219,18 @@ struct AuthorView: View {
         hasSearched = true
         selectedAuthor = nil
 
-        let local = localPapersByAuthor(query)
+        let local = localPapersMatching(target)
 
         var combined = local
-        if local.count < 10 {
+        // Always reach out to arXiv when the user submits — local cache may be
+        // stale or empty for this author. Skip only if they have a deep local hit.
+        if local.count < 25 {
             isLoading = true
             let manager = NetworkManager(context: modelContext)
-            let fetched = await manager.fetchPapersByAuthor(name: query)
+            let fetched = await manager.fetchPapersByAuthor(name: query, maxResults: 100)
             isLoading = false
+
+            if Task.isCancelled { return }
 
             var byURL: [URL: Paper] = [:]
             for paper in local + fetched { byURL[paper.url] = paper }
@@ -219,11 +239,15 @@ struct AuthorView: View {
 
         allResults = combined
 
-        let lowered = query.lowercased()
+        // Collect distinct author-string variants matching the query for the
+        // "Which one?" chip row (e.g., "Witten, Edward" and "Witten, E.").
         var authorSet: Set<String> = []
         for paper in combined {
-            for author in paper.authors where author.lowercased().contains(lowered) {
-                authorSet.insert(author)
+            for author in paper.authors {
+                guard let parsed = AuthorName.parse(author) else { continue }
+                if target.matches(parsed) {
+                    authorSet.insert(author)
+                }
             }
         }
         matchedAuthors = authorSet.sorted()
@@ -232,33 +256,39 @@ struct AuthorView: View {
     }
 
     private func searchExactAuthor(_ author: String) async {
+        guard let target = AuthorName.parse(author) else { return }
         selectedAuthor = author
 
         isLoading = true
         let manager = NetworkManager(context: modelContext)
-        let fetched = await manager.fetchPapersByAuthor(name: author, maxResults: 50)
+        let fetched = await manager.fetchPapersByAuthor(name: author, maxResults: 100)
         isLoading = false
 
-        let local = localPapersByAuthor(author).filter { paper in
-            paper.authors.contains { $0 == author }
-        }
+        if Task.isCancelled { return }
+
+        let local = localPapersMatching(target)
 
         var byURL: [URL: Paper] = [:]
         for paper in local + fetched { byURL[paper.url] = paper }
         let combined = Array(byURL.values
-            .filter { $0.authors.contains(author) }
+            .filter { paper in
+                paper.authors.contains { authorString in
+                    AuthorName.parse(authorString).map { target.matches($0) } ?? false
+                }
+            }
             .sorted { $0.date > $1.date })
 
         allResults = combined
         papers = Array(combined.prefix(50))
     }
 
-    private func localPapersByAuthor(_ name: String) -> [Paper] {
-        let lowered = name.lowercased()
+    private func localPapersMatching(_ target: AuthorName) -> [Paper] {
         do {
             let all = try modelContext.fetch(FetchDescriptor<Paper>())
             return all.filter { paper in
-                paper.authors.contains { $0.lowercased().contains(lowered) }
+                paper.authors.contains { authorString in
+                    AuthorName.parse(authorString).map { target.matches($0) } ?? false
+                }
             }
             .sorted { $0.date > $1.date }
         } catch {

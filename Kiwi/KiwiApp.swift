@@ -10,9 +10,17 @@ struct KiwiApp: App {
     @StateObject private var settingsStore: SettingsStore
     @StateObject private var uiState = KiwiUIState()
     @StateObject private var router = KiwiRouter()
+    @StateObject private var syncService = PaperSyncService()
 
     init() {
         Self.ensureApplicationSupportExists()
+
+        // Hide the native pull-to-refresh spinner everywhere — we draw our own
+        // RefreshingDotsView instead. SwiftUI's `.tint(.clear)` doesn't reliably
+        // suppress it, but zeroing the UIRefreshControl appearance does.
+        let clearRefresh = UIRefreshControl.appearance()
+        clearRefresh.tintColor = .clear
+        clearRefresh.attributedTitle = NSAttributedString(string: "")
 
         let builtContainer: ModelContainer
         do {
@@ -34,7 +42,9 @@ struct KiwiApp: App {
                 .environmentObject(settingsStore)
                 .environmentObject(uiState)
                 .environmentObject(router)
+                .environmentObject(syncService)
                 .preferredColorScheme(settingsStore.darkModeEnabled ? .dark : .light)
+                .task { syncService.bind(uiState: uiState) }
         }
     }
 

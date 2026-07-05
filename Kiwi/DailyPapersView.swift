@@ -5,6 +5,7 @@ struct DailyPapersView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var settingsStore: SettingsStore
     @EnvironmentObject private var uiState: KiwiUIState
+    @EnvironmentObject private var syncService: PaperSyncService
 
     @Query(sort: \Paper.date, order: .reverse)
     private var papers: [Paper]
@@ -13,8 +14,6 @@ struct DailyPapersView: View {
     // re-renders when dailyPapersDays changes, independent of SettingsStore.
     @Query private var userSettingsList: [UserSettings]
     private var dailyPapersDays: Int { userSettingsList.first?.dailyPapersDays ?? 7 }
-
-    @State private var isRefreshing = false
 
     private static let dayCalendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
@@ -38,19 +37,12 @@ struct DailyPapersView: View {
     }
 
     private func refreshDailyPapers() async {
-        let categories = settingsStore.selectedCategories
-        guard !categories.isEmpty else {
-            uiState.flashRefreshMessage("Choose categories in Settings")
-            return
-        }
-        let manager = NetworkManager(context: modelContext)
-        let result = await manager.syncPapers(for: categories)
-        guard !result.cancelled else { return }
-        if result.added > 0 {
-            uiState.flashRefreshMessage("Added \(result.added) papers!")
-        } else {
-            uiState.flashRefreshMessage("Up to date — \(NetworkManager.friendlyNextAnnouncement())")
-        }
+        // The sync itself runs on a service-owned unstructured Task — it survives
+        // even if SwiftUI cancels this refreshable closure mid-flight.
+        await syncService.sync(
+            context: modelContext,
+            categories: settingsStore.selectedCategories
+        )
     }
 
     var body: some View {
@@ -72,11 +64,11 @@ struct DailyPapersView: View {
                 if days.isEmpty {
                     ScrollView {
                         VStack(spacing: 10) {
-                            if isRefreshing {
+                            if uiState.isRefreshing {
                                 RefreshingDotsView()
                                     .padding(.top, 40)
                             }
-                            Spacer(minLength: isRefreshing ? 100 : 140)
+                            Spacer(minLength: uiState.isRefreshing ? 100 : 140)
                             Text("No papers to show")
                                 .font(.system(size: 20, weight: .semibold, design: .rounded))
                                 .foregroundColor(KiwiColors.darkBrown)
@@ -90,15 +82,13 @@ struct DailyPapersView: View {
                     }
                     .scrollIndicators(.hidden)
                     .refreshable {
-                        isRefreshing = true
                         await refreshDailyPapers()
-                        isRefreshing = false
                     }
                     .tint(.clear)
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 14) {
-                            if isRefreshing {
+                            if uiState.isRefreshing {
                                 RefreshingDotsView()
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 8)
@@ -124,9 +114,7 @@ struct DailyPapersView: View {
                         .padding(.bottom, 18)
                     }
                     .refreshable {
-                        isRefreshing = true
                         await refreshDailyPapers()
-                        isRefreshing = false
                     }
                     .tint(.clear)
                 }
