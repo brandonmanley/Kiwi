@@ -47,7 +47,7 @@ struct SettingsView: View {
                 KiwiNavBar(
                     title: {
                         Text("Settings")
-                            .font(.custom("Pulang", size: 22))
+                            .font(.custom("Pulang", size: 22, relativeTo: .title))
                             .foregroundColor(KiwiColors.darkBrown)
                     },
                     left: {
@@ -448,7 +448,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text("Kiwi beta")
-                            .font(.custom("Pulang", size: 18))
+                            .font(.custom("Pulang", size: 18, relativeTo: .title3))
                             .foregroundColor(KiwiColors.darkBrown)
 
                         Spacer()

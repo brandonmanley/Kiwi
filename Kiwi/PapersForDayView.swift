@@ -122,13 +122,23 @@ struct PapersForDayView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var activeFilter: PaperFilter = .new
 
+    // Cached filtered + scored order as IDs, resolved against the current
+    // papers on each render — see HomeView for the rationale (cached Paper
+    // references can outlive their backing data and crash on access).
+    @State private var displayedIDs: [UUID] = []
+
+    private var displayedPapers: [Paper] {
+        let byID = Dictionary(uniqueKeysWithValues: papers.map { ($0.id, $0) })
+        return displayedIDs.compactMap { byID[$0] }
+    }
+
     enum PaperFilter: String, CaseIterable {
         case new = "New"
         case crossList = "Cross-lists"
         case updates = "Updates"
     }
 
-    private var filteredPapers: [Paper] {
+    private func computeDisplayedIDs() -> [UUID] {
         let base: [Paper]
         switch activeFilter {
         case .new:
@@ -139,7 +149,9 @@ struct PapersForDayView: View {
             base = papers.filter { $0.isUpdate }
         }
 
-        guard let prepared = KeywordScorer.prepare(keywords: settingsStore.keywords) else { return base }
+        guard let prepared = KeywordScorer.prepare(keywords: settingsStore.keywords) else {
+            return base.map(\.id)
+        }
 
         return base
             .map { ($0, KeywordScorer.score(paper: $0, prepared: prepared)) }
@@ -147,7 +159,7 @@ struct PapersForDayView: View {
                 if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
                 return lhs.0.date > rhs.0.date
             }
-            .map(\.0)
+            .map(\.0.id)
     }
 
     private var counts: (new: Int, crossList: Int, updates: Int) {
@@ -178,7 +190,7 @@ struct PapersForDayView: View {
                             .month(.abbreviated)
                             .day()
                             .year()))
-                        .font(.custom("Pulang", size: 22))
+                        .font(.custom("Pulang", size: 22, relativeTo: .title))
                         .foregroundColor(KiwiColors.darkBrown)
                     },
                     left: {
@@ -198,7 +210,7 @@ struct PapersForDayView: View {
                     }
                 )
             },
-            items: filteredPapers,
+            items: displayedPapers,
             row: { paper in
                 paperRow(paper)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -249,6 +261,10 @@ struct PapersForDayView: View {
                     .safeAreaPadding(.bottom)
             }
         )
+        .onAppear { displayedIDs = computeDisplayedIDs() }
+        .onChange(of: activeFilter) { _, _ in displayedIDs = computeDisplayedIDs() }
+        .onChange(of: papers) { _, _ in displayedIDs = computeDisplayedIDs() }
+        .onChange(of: settingsStore.keywords) { _, _ in displayedIDs = computeDisplayedIDs() }
         .sheet(item: $selectedURL) { wrapper in
             SafariView(url: wrapper.url)
         }
@@ -271,7 +287,7 @@ struct PapersForDayView: View {
             Spacer()
 
             Text("\(activeCount) papers")
-                .font(.custom("Pulang", size: 14))
+                .font(.custom("Pulang", size: 14, relativeTo: .subheadline))
                 .foregroundColor(KiwiColors.darkBrown)
         }
         .padding(.vertical, 10)
@@ -288,7 +304,7 @@ struct PapersForDayView: View {
     private func filterButton(_ filter: PaperFilter) -> some View {
         Button { activeFilter = filter } label: {
             Text(label(for: filter))
-                .font(.custom("Pulang", size: 13))
+                .font(.custom("Pulang", size: 13, relativeTo: .footnote))
                 .padding(.horizontal, 10)
                 .frame(height: 28)
                 .foregroundColor(activeFilter == filter ? KiwiColors.creamWhite : KiwiColors.darkBrown)
@@ -378,7 +394,7 @@ struct PapersForDayView: View {
 
     private func badge(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.custom("Pulang", size: 15))
+            .font(.custom("Pulang", size: 15, relativeTo: .headline))
             .bold()
             .foregroundColor(color)
     }

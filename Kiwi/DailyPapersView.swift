@@ -4,7 +4,6 @@ import SwiftData
 struct DailyPapersView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var settingsStore: SettingsStore
-    @EnvironmentObject private var uiState: KiwiUIState
     @EnvironmentObject private var syncService: PaperSyncService
 
     @Query(sort: \Paper.date, order: .reverse)
@@ -57,18 +56,14 @@ struct DailyPapersView: View {
             VStack(spacing: 0) {
                 KiwiAppNavBar {
                     Text("Daily papers")
-                        .font(.custom("Pulang", size: 22))
+                        .font(.custom("Pulang", size: 22, relativeTo: .title))
                         .foregroundColor(KiwiColors.darkBrown)
                 }
 
                 if days.isEmpty {
                     ScrollView {
                         VStack(spacing: 10) {
-                            if uiState.isRefreshing {
-                                RefreshingDotsView()
-                                    .padding(.top, 40)
-                            }
-                            Spacer(minLength: uiState.isRefreshing ? 100 : 140)
+                            Spacer(minLength: 140)
                             Text("No papers to show")
                                 .font(.system(size: 20, weight: .semibold, design: .rounded))
                                 .foregroundColor(KiwiColors.darkBrown)
@@ -88,11 +83,6 @@ struct DailyPapersView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 14) {
-                            if uiState.isRefreshing {
-                                RefreshingDotsView()
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                            }
                             ForEach(days, id: \.day) { entry in
                                 NavigationLink {
                                     PapersForDayView(papers: entry.papers, day: entry.day)
@@ -150,7 +140,7 @@ private struct DayShelfRow: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(day.formatted(.dateTime.weekday(.wide)))
-                        .font(.custom("Pulang", size: 16))
+                        .font(.custom("Pulang", size: 16, relativeTo: .headline))
                         .foregroundColor(KiwiColors.darkBrown)
 
                     Text(day.formatted(.dateTime.month(.abbreviated).day().year()))
@@ -162,7 +152,7 @@ private struct DayShelfRow: View {
 
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("\(paperCount) papers")
-                        .font(.custom("Pulang", size: 16))
+                        .font(.custom("Pulang", size: 16, relativeTo: .headline))
                         .foregroundColor(KiwiColors.darkBrown.opacity(clicked ? 0.65 : 0.90))
 
                     Text(triageEstimate)

@@ -106,7 +106,7 @@ struct AuthorView: View {
         VStack(spacing: 10) {
             KiwiAppNavBar {
                 Text("Author")
-                    .font(.custom("Pulang", size: 22))
+                    .font(.custom("Pulang", size: 22, relativeTo: .title))
                     .foregroundColor(KiwiColors.darkBrown)
             }
 
@@ -369,7 +369,7 @@ struct AuthorView: View {
 
     private func badge(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.custom("Pulang", size: 15))
+            .font(.custom("Pulang", size: 15, relativeTo: .headline))
             .bold()
             .foregroundColor(color)
     }
@@ -380,7 +380,8 @@ struct AuthorView: View {
         VStack(spacing: 10) {
             Spacer()
             if isLoading {
-                RefreshingDotsView()
+                ProgressView()
+                    .tint(KiwiColors.darkBrown)
                     .padding(.bottom, 20)
                 Text("Searching arXiv…")
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
@@ -413,7 +414,7 @@ struct AuthorView: View {
     private var bottomBar: some View {
         HStack {
             Text("\(papers.count) papers")
-                .font(.custom("Pulang", size: 14))
+                .font(.custom("Pulang", size: 14, relativeTo: .subheadline))
                 .foregroundColor(KiwiColors.darkBrown)
 
             Spacer()

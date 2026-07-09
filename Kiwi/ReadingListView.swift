@@ -112,7 +112,7 @@ struct ReadingListView: View {
         KiwiNavBar(
             title: {
                 Text("Reading list")
-                    .font(.custom("Pulang", size: 22))
+                    .font(.custom("Pulang", size: 22, relativeTo: .title))
                     .foregroundColor(KiwiColors.darkBrown)
             },
             left: { SideMenuButton() },
@@ -225,7 +225,7 @@ struct ReadingListView: View {
 
     private func badge(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.custom("Pulang", size: 15))
+            .font(.custom("Pulang", size: 15, relativeTo: .headline))
             .bold()
             .foregroundColor(color)
     }

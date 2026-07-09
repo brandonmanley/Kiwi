@@ -30,44 +30,58 @@ struct PaperScaffold<
             background()
                 .ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                header()
-
-                if items.isEmpty {
-                    emptyState()
-                } else {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Rectangle()
-                                .fill(KiwiColors.darkBrown.opacity(0.1))
-                            Rectangle()
-                                .fill(KiwiColors.darkGreen)
-                                .frame(width: geo.size.width * scrollProgress)
-                                .animation(.easeOut(duration: 0.15), value: scrollProgress)
-                        }
+            // safeAreaInset(edge:.bottom) with an EmptyView overlay corrupts the
+            // List's scrollable range — content can scroll a full screen past its
+            // end (seen on the reading list, which passes EmptyView). Only apply
+            // the inset when there is a real overlay.
+            if BottomOverlay.self == EmptyView.self {
+                content
+            } else {
+                content
+                    .safeAreaInset(edge: .bottom) {
+                        bottomOverlay()
                     }
-                    .frame(height: 3)
+            }
+        }
+    }
 
-                    List(items, id: \.self) { item in
-                        row(item)
-                            .listRowBackground(Color.clear)
-                    }
-                    .scrollContentBackground(.hidden)
-                    .listStyle(.plain)
-                    .onScrollGeometryChange(for: ScrollMetrics.self) { geo in
-                        ScrollMetrics(
-                            offset: geo.contentOffset.y,
-                            contentHeight: geo.contentSize.height,
-                            containerHeight: geo.containerSize.height
-                        )
-                    } action: { _, new in
-                        updateScrollProgress(new)
+    private var content: some View {
+        VStack(spacing: 0) {
+            header()
+
+            if items.isEmpty {
+                emptyState()
+            } else {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(KiwiColors.darkBrown.opacity(0.1))
+                        Rectangle()
+                            .fill(KiwiColors.darkGreen)
+                            .frame(width: geo.size.width * scrollProgress)
+                            .animation(.easeOut(duration: 0.15), value: scrollProgress)
                     }
                 }
-            }
+                .frame(height: 3)
 
-            .safeAreaInset(edge: .bottom) {
-                bottomOverlay()
+                List(items, id: \.self) { item in
+                    row(item)
+                        .listRowBackground(Color.clear)
+                }
+                .scrollContentBackground(.hidden)
+                .listStyle(.plain)
+                // Don't let the list scroll/bounce past its content when the
+                // rows don't fill the screen — scrolling stops at the bottom.
+                .scrollBounceBehavior(.basedOnSize)
+                .onScrollGeometryChange(for: ScrollMetrics.self) { geo in
+                    ScrollMetrics(
+                        offset: geo.contentOffset.y,
+                        contentHeight: geo.contentSize.height,
+                        containerHeight: geo.containerSize.height
+                    )
+                } action: { _, new in
+                    updateScrollProgress(new)
+                }
             }
         }
     }

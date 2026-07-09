@@ -38,7 +38,7 @@ struct OnboardingView: View {
                                         .foregroundColor(KiwiColors.darkBrown)
 
                                     Text("Kiwi")
-                                        .font(.custom("Pulang", size: 56))
+                                        .font(.custom("Pulang", size: 56, relativeTo: .largeTitle))
                                         .foregroundColor(KiwiColors.darkBrown)
 
                                     Text("Pick a few arXiv categories to track.")

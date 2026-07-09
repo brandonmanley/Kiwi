@@ -114,46 +114,39 @@ import Foundation
         return cal.date(from: DateComponents(year: year, month: month, day: day, hour: hour))!
     }
 
-    private func components(from date: Date) -> DateComponents {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "America/New_York")!
-        return cal.dateComponents([.year, .month, .day, .weekday, .hour], from: date)
+    // The result must be midnight in the *local* calendar on the ET-defined
+    // listing day, so day-bucketing works in any user timezone.
+    private func expectListingDay(_ result: Date, year: Int, month: Int, day: Int) {
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.year, .month, .day], from: result)
+        #expect(comps.year == year)
+        #expect(comps.month == month)
+        #expect(comps.day == day)
+        #expect(result == cal.startOfDay(for: result)) // local midnight
     }
 
-    @Test func mondayMorningAnnouncedTuesday() {
-        // Monday 10am ET → announced Mon 8pm → shifted to Tue 8pm
+    @Test func mondayMorningListedTuesday() {
+        // Monday 10am ET → announced Mon 8pm ET → listed Tue May 5
         let input = makeDate(year: 2026, month: 5, day: 4, hour: 10)
-        let result = NetworkManager.announcementDate(from: input)
-        let comps = components(from: result)
-        #expect(comps.weekday == 3) // Tuesday
-        #expect(comps.hour == 20)
+        expectListingDay(NetworkManager.announcementDate(from: input), year: 2026, month: 5, day: 5)
     }
 
-    @Test func mondayAfternoonAnnouncedWednesday() {
-        // Monday 3pm ET → announced Tue 8pm → shifted to Wed 8pm
+    @Test func mondayAfternoonListedWednesday() {
+        // Monday 3pm ET → announced Tue 8pm ET → listed Wed May 6
         let input = makeDate(year: 2026, month: 5, day: 4, hour: 15)
-        let result = NetworkManager.announcementDate(from: input)
-        let comps = components(from: result)
-        #expect(comps.weekday == 4) // Wednesday
-        #expect(comps.hour == 20)
+        expectListingDay(NetworkManager.announcementDate(from: input), year: 2026, month: 5, day: 6)
     }
 
-    @Test func thursdayAfternoonAnnouncedMonday() {
-        // Thu 3pm ET → next Sun 8pm → shifted to Mon 8pm
+    @Test func thursdayAfternoonListedMonday() {
+        // Thu 3pm ET → announced Fri 8pm ET → listed Mon May 11
         let input = makeDate(year: 2026, month: 5, day: 7, hour: 15)
-        let result = NetworkManager.announcementDate(from: input)
-        let comps = components(from: result)
-        #expect(comps.weekday == 2) // Monday
-        #expect(comps.hour == 20)
+        expectListingDay(NetworkManager.announcementDate(from: input), year: 2026, month: 5, day: 11)
     }
 
-    @Test func saturdayAnnouncedTuesday() {
-        // Saturday → next Mon 8pm → shifted to Tue 8pm
+    @Test func saturdayListedTuesday() {
+        // Saturday → announced Mon 8pm ET → listed Tue May 12
         let input = makeDate(year: 2026, month: 5, day: 9, hour: 12)
-        let result = NetworkManager.announcementDate(from: input)
-        let comps = components(from: result)
-        #expect(comps.weekday == 3) // Tuesday
-        #expect(comps.hour == 20)
+        expectListingDay(NetworkManager.announcementDate(from: input), year: 2026, month: 5, day: 12)
     }
 }
 
@@ -193,5 +186,110 @@ import Foundation
         #expect(result.count == 2)
         #expect(result.contains("quantum"))
         #expect(result.contains("neural"))
+    }
+}
+
+// MARK: - arXiv dedup key Tests
+
+@Suite struct ArxivDedupKeyTests {
+
+    @Test func stripsTrailingVersion() {
+        let v1 = URL(string: "http://arxiv.org/abs/2501.12345v1")!
+        let v2 = URL(string: "http://arxiv.org/abs/2501.12345v2")!
+        #expect(arxivDedupKey(for: v1) == arxivDedupKey(for: v2))
+        #expect(arxivDedupKey(for: v1) == "http://arxiv.org/abs/2501.12345")
+    }
+
+    @Test func leavesUnversionedURLUnchanged() {
+        let url = URL(string: "http://arxiv.org/abs/2501.12345")!
+        #expect(arxivDedupKey(for: url) == "http://arxiv.org/abs/2501.12345")
+    }
+
+    @Test func doesNotStripVersionLikeSubstringMidPath() {
+        // Only a trailing vN is a version suffix.
+        let url = URL(string: "http://arxiv.org/abs/v2paper.99999")!
+        #expect(arxivDedupKey(for: url) == "http://arxiv.org/abs/v2paper.99999")
+    }
+}
+
+// MARK: - ArxivPageParser Tests
+
+@Suite struct ArxivPageParserTests {
+
+    private func feed(_ entries: String) -> Data {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+        \(entries)
+        </feed>
+        """.data(using: .utf8)!
+    }
+
+    @Test func parsesSingleEntry() {
+        let data = feed("""
+        <entry>
+          <id>http://arxiv.org/abs/2501.12345v1</id>
+          <updated>2025-01-20T10:00:00Z</updated>
+          <published>2025-01-20T10:00:00Z</published>
+          <title>A Study of Quantum Widgets</title>
+          <summary>We investigate quantum widgets.</summary>
+          <author><name>Alice Smith</name></author>
+          <author><name>Bob Jones</name></author>
+          <arxiv:primary_category term="hep-ph"/>
+          <category term="hep-ph"/>
+          <category term="hep-th"/>
+        </entry>
+        """)
+
+        let result = ArxivPageParser().parse(data)
+        #expect(result.count == 1)
+
+        let paper = result["http://arxiv.org/abs/2501.12345"]
+        #expect(paper != nil)
+        #expect(paper?.title == "A Study of Quantum Widgets")
+        #expect(paper?.abstract == "We investigate quantum widgets.")
+        #expect(paper?.authors == ["Alice Smith", "Bob Jones"])
+        #expect(paper?.primaryCategory == "hep-ph")
+        #expect(paper?.categories == ["hep-ph", "hep-th"])
+        #expect(paper?.url?.absoluteString == "http://arxiv.org/abs/2501.12345v1")
+    }
+
+    @Test func collapsesVersionsKeepingNewestURL() {
+        // Same paper appearing as v1 and v2 in one feed must collapse to a
+        // single record, retaining the newest versioned URL for linking.
+        let data = feed("""
+        <entry>
+          <id>http://arxiv.org/abs/2501.12345v1</id>
+          <updated>2025-01-20T10:00:00Z</updated>
+          <published>2025-01-20T10:00:00Z</published>
+          <title>Version One</title>
+          <summary>First.</summary>
+          <author><name>Alice Smith</name></author>
+          <arxiv:primary_category term="hep-ph"/>
+          <category term="hep-ph"/>
+        </entry>
+        <entry>
+          <id>http://arxiv.org/abs/2501.12345v2</id>
+          <updated>2025-02-01T10:00:00Z</updated>
+          <published>2025-01-20T10:00:00Z</published>
+          <title>Version Two</title>
+          <summary>Second.</summary>
+          <author><name>Alice Smith</name></author>
+          <arxiv:primary_category term="hep-ph"/>
+          <category term="hep-ph"/>
+        </entry>
+        """)
+
+        let result = ArxivPageParser().parse(data)
+        #expect(result.count == 1)
+
+        let paper = result["http://arxiv.org/abs/2501.12345"]
+        #expect(paper != nil)
+        #expect(paper?.url?.absoluteString == "http://arxiv.org/abs/2501.12345v2")
+    }
+
+    @Test func emptyFeedYieldsNothing() {
+        let result = ArxivPageParser().parse(feed(""))
+        #expect(result.isEmpty)
     }
 }

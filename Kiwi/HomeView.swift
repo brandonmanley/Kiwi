@@ -7,7 +7,6 @@ struct HomeView: View {
 
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var settingsStore: SettingsStore
-    @EnvironmentObject private var uiState: KiwiUIState
     @EnvironmentObject private var syncService: PaperSyncService
 
     @State private var selectedURL: IdentifiableURL?
@@ -15,6 +14,19 @@ struct HomeView: View {
     @State private var expandedPaperID: Paper.ID?
 
     @State private var activeFilter: PaperFilter = .new
+
+    // Cached filtered + scored order, stored as IDs and resolved against the
+    // live @Query results on each render (same pattern as SearchView). Caching
+    // avoids re-lemmatizing the whole list when a row expands; caching *IDs*
+    // instead of model objects matters: sync deletes papers (pruning), and a
+    // cached Paper reference whose backing data is gone crashes on first
+    // property access.
+    @State private var displayedIDs: [UUID] = []
+
+    private var displayedPapers: [Paper] {
+        let byID = Dictionary(uniqueKeysWithValues: papers.map { ($0.id, $0) })
+        return displayedIDs.compactMap { byID[$0] }
+    }
 
     @State private var didAttemptAutoFetch = false
 
@@ -37,7 +49,7 @@ struct HomeView: View {
         )
     }
 
-    private var filteredPapers: [Paper] {
+    private func computeDisplayedIDs() -> [UUID] {
         let base: [Paper]
         switch activeFilter {
         case .new:
@@ -48,7 +60,9 @@ struct HomeView: View {
             base = papers.filter { $0.isUpdate }
         }
 
-        guard let prepared = KeywordScorer.prepare(keywords: settingsStore.keywords) else { return base }
+        guard let prepared = KeywordScorer.prepare(keywords: settingsStore.keywords) else {
+            return base.map(\.id)
+        }
 
         return base
             .map { ($0, KeywordScorer.score(paper: $0, prepared: prepared)) }
@@ -56,9 +70,9 @@ struct HomeView: View {
                 if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
                 return lhs.0.date > rhs.0.date
             }
-            .map(\.0)
+            .map(\.0.id)
     }
-    
+
 
     private var counts: (new: Int, crossList: Int, updates: Int) {
         (
@@ -89,11 +103,11 @@ struct HomeView: View {
             header: {
                 KiwiAppNavBar {
                     Text("Today's papers")
-                        .font(.custom("Pulang", size: 22))
+                        .font(.custom("Pulang", size: 22, relativeTo: .title))
                         .foregroundColor(KiwiColors.darkBrown)
                 }
             },
-            items: filteredPapers,
+            items: displayedPapers,
             row: { paper in
                 paperRow(paper)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -143,6 +157,10 @@ struct HomeView: View {
             }
         )
         .task { await autoFetchIfNeeded() }
+        .onAppear { displayedIDs = computeDisplayedIDs() }
+        .onChange(of: activeFilter) { _, _ in displayedIDs = computeDisplayedIDs() }
+        .onChange(of: papers) { _, _ in displayedIDs = computeDisplayedIDs() }
+        .onChange(of: settingsStore.keywords) { _, _ in displayedIDs = computeDisplayedIDs() }
         .sheet(item: $selectedURL) { wrapper in
             SafariView(url: wrapper.url)
         }
@@ -165,7 +183,7 @@ struct HomeView: View {
             Spacer()
 
             Text("\(activeCount) papers")
-                .font(.custom("Pulang", size: 14))
+                .font(.custom("Pulang", size: 14, relativeTo: .subheadline))
                 .foregroundColor(KiwiColors.darkBrown)
         }
         .padding(.vertical, 10)
@@ -182,7 +200,7 @@ struct HomeView: View {
     private func filterButton(_ filter: PaperFilter) -> some View {
         Button { activeFilter = filter } label: {
             Text(label(for: filter))
-                .font(.custom("Pulang", size: 13))
+                .font(.custom("Pulang", size: 13, relativeTo: .footnote))
                 .padding(.horizontal, 10)
                 .frame(height: 28)
                 .foregroundColor(activeFilter == filter ? KiwiColors.creamWhite : KiwiColors.darkBrown)
@@ -272,7 +290,7 @@ struct HomeView: View {
 
     private func badge(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.custom("Pulang", size: 15))
+            .font(.custom("Pulang", size: 15, relativeTo: .headline))
             .bold()
             .foregroundColor(color)
     }
@@ -280,12 +298,7 @@ struct HomeView: View {
     private var emptyState: some View {
         ScrollView {
             VStack(spacing: 10) {
-                if uiState.isRefreshing {
-                    RefreshingDotsView()
-                        .padding(.top, 40)
-                }
-
-                Spacer(minLength: uiState.isRefreshing ? 100 : 140)
+                Spacer(minLength: 140)
 
                 Text("No papers for today yet")
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
@@ -306,6 +319,10 @@ struct HomeView: View {
     // MARK: - Fetch logic
 
     private func autoFetchIfNeeded() async {
+        #if DEBUG
+        // Seeded UI-test runs must stay hermetic — no live arXiv traffic.
+        if KiwiApp.isUITestSeedRun { return }
+        #endif
         guard !didAttemptAutoFetch else { return }
         didAttemptAutoFetch = true
         await syncService.autoSync(

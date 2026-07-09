@@ -52,7 +52,7 @@ struct SideMenuOverlay: View {
             
             HStack{
                 Text("Kiwi")
-                    .font(.custom("Pulang", size: 34))
+                    .font(.custom("Pulang", size: 34, relativeTo: .largeTitle))
                     .foregroundColor(KiwiColors.darkBrown)
                     .padding(.top, 20)
                 

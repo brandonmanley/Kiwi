@@ -114,7 +114,7 @@ struct SearchView: View {
         VStack(spacing: 10) {
             KiwiAppNavBar(showReadingListButton: false) {
                 Text("Search")
-                    .font(.custom("Pulang", size: 22))
+                    .font(.custom("Pulang", size: 22, relativeTo: .title))
                     .foregroundColor(KiwiColors.darkBrown)
             }
 
@@ -328,7 +328,7 @@ struct SearchView: View {
 
     private func badge(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.custom("Pulang", size: 15))
+            .font(.custom("Pulang", size: 15, relativeTo: .headline))
             .bold()
             .foregroundColor(color)
     }
@@ -340,7 +340,7 @@ struct SearchView: View {
             Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                  ? "\(items.count) papers"
                  : "\(items.count) matches")
-                .font(.custom("Pulang", size: 14))
+                .font(.custom("Pulang", size: 14, relativeTo: .subheadline))
                 .foregroundColor(KiwiColors.darkBrown)
 
             Spacer()

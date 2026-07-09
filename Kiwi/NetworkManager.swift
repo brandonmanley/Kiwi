@@ -1,6 +1,42 @@
 import Foundation
 import SwiftData
 
+// MARK: - arXiv dedup key
+
+// arXiv's <id> resolves to a versioned abs URL (…/abs/2501.12345v2). When a
+// paper updates from v1 to v2 the URL changes, so deduping on the raw URL would
+// store the same paper twice. We key dedup on the version-stripped URL while
+// keeping the versioned URL itself for linking.
+func arxivDedupKey(for url: URL) -> String {
+    var s = url.absoluteString
+    if let range = s.range(of: #"v\d+$"#, options: .regularExpression) {
+        s.removeSubrange(range)
+    }
+    return s
+}
+
+// MARK: - Rate limiter
+
+// arXiv's API guidelines ask for roughly one request every few seconds and
+// discourage bursts. This actor serializes request *starts* so concurrent
+// category fetches don't fire a batch at once.
+private actor ArxivRateLimiter {
+    static let shared = ArxivRateLimiter()
+
+    private let minInterval: TimeInterval = 1.0
+    private var nextEarliestStart: Date = .distantPast
+
+    func waitForSlot() async {
+        let now = Date()
+        let start = max(now, nextEarliestStart)
+        nextEarliestStart = start.addingTimeInterval(minInterval)
+        let delay = start.timeIntervalSince(now)
+        if delay > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+    }
+}
+
 // MARK: - ParsedPaper (value type — no SwiftData dependency)
 
 struct ParsedPaper: Sendable {
@@ -30,11 +66,14 @@ private final class PaperBuilder {
 
 // MARK: - ArxivPageParser (self-contained per HTTP response — no shared state)
 
-private final class ArxivPageParser: NSObject, XMLParserDelegate {
+// Internal (not private) so unit tests can feed it saved arXiv Atom fixtures —
+// the parsing/merging logic here is the most fragile surface in the app.
+final class ArxivPageParser: NSObject, XMLParserDelegate {
 
     private var currentElement = ""
     private var currentBuilder: PaperBuilder?
-    private var builders: [URL: PaperBuilder] = [:]
+    // Keyed by version-stripped dedup key so v1/v2 of the same paper collapse.
+    private var builders: [String: PaperBuilder] = [:]
 
     private static let isoFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -42,14 +81,15 @@ private final class ArxivPageParser: NSObject, XMLParserDelegate {
         return f
     }()
 
-    func parse(_ data: Data) -> [URL: ParsedPaper] {
+    func parse(_ data: Data) -> [String: ParsedPaper] {
         let xmlParser = XMLParser(data: data)
         xmlParser.delegate = self
         xmlParser.parse()
 
-        var result: [URL: ParsedPaper] = [:]
-        for (url, b) in builders {
-            result[url] = ParsedPaper(
+        var result: [String: ParsedPaper] = [:]
+        for (key, b) in builders {
+            guard let url = b.url else { continue }
+            result[key] = ParsedPaper(
                 title: b.title.trimmingCharacters(in: .whitespacesAndNewlines),
                 authors: b.authors,
                 abstract: b.abstract.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -131,8 +171,13 @@ private final class ArxivPageParser: NSObject, XMLParserDelegate {
         if elementName == "entry" {
             defer { currentBuilder = nil }
             guard let url = builder.url else { return }
+            let key = arxivDedupKey(for: url)
 
-            if let existing = builders[url] {
+            if let existing = builders[key] {
+                // Keep the newest versioned URL for linking.
+                if let u = builder.updatedDate, let eu = existing.updatedDate, u > eu {
+                    existing.url = builder.url
+                }
                 existing.categories.formUnion(builder.categories)
                 if existing.primaryCategory == nil || existing.primaryCategory?.isEmpty == true {
                     existing.primaryCategory = builder.primaryCategory
@@ -148,7 +193,7 @@ private final class ArxivPageParser: NSObject, XMLParserDelegate {
                     existing.submittedDate = builder.submittedDate
                 }
             } else {
-                builders[url] = builder
+                builders[key] = builder
             }
         }
     }
@@ -164,10 +209,48 @@ private final class ArxivPageParser: NSObject, XMLParserDelegate {
 private enum ArxivFetcher {
 
     struct FetchResult {
-        var papers: [URL: ParsedPaper]
+        var papers: [String: ParsedPaper]
         // True if at least one category produced a successful HTTP response.
         // Lets callers distinguish "arXiv had nothing new" from "network completely failed".
         var anySucceeded: Bool
+    }
+
+    // Shared session carrying the descriptive User-Agent arXiv's API guidelines ask for.
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.httpAdditionalHeaders = [
+            "User-Agent": "Kiwi/1.0 (mailto:brandonmanley10@gmail.com)"
+        ]
+        return URLSession(configuration: config)
+    }()
+
+    private struct HTTPStatusError: Error {
+        let statusCode: Int
+        let retryAfter: TimeInterval?
+    }
+
+    // Performs a request through the shared rate limiter and turns non-2xx
+    // responses into thrown errors, so a 429/503 with an HTML error body can't
+    // masquerade as a successful (but empty) parse. Retries once on a
+    // throttling status that carries a Retry-After header.
+    private static func fetchData(_ request: URLRequest) async throws -> Data {
+        var attempt = 0
+        while true {
+            await ArxivRateLimiter.shared.waitForSlot()
+            let (data, response) = try await session.data(for: request)
+
+            guard let http = response as? HTTPURLResponse else { return data }
+            if (200...299).contains(http.statusCode) { return data }
+
+            let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
+            let isThrottled = (http.statusCode == 429 || http.statusCode == 503)
+            if isThrottled, let retryAfter, attempt == 0 {
+                attempt += 1
+                try await Task.sleep(nanoseconds: UInt64(min(retryAfter, 30) * 1_000_000_000))
+                continue
+            }
+            throw HTTPStatusError(statusCode: http.statusCode, retryAfter: retryAfter)
+        }
     }
 
     static func fetchAll(
@@ -176,14 +259,14 @@ private enum ArxivFetcher {
         lookbackDays: Int = 10
     ) async -> FetchResult {
         let maxConcurrent = 4
-        var merged: [URL: ParsedPaper] = [:]
+        var merged: [String: ParsedPaper] = [:]
         var anySucceeded = false
 
         for batchStart in stride(from: 0, to: categories.count, by: maxConcurrent) {
             let batchEnd = min(batchStart + maxConcurrent, categories.count)
             let batch = Array(categories[batchStart..<batchEnd])
 
-            await withTaskGroup(of: (papers: [URL: ParsedPaper], succeeded: Bool).self) { group in
+            await withTaskGroup(of: (papers: [String: ParsedPaper], succeeded: Bool).self) { group in
                 for category in batch {
                     group.addTask {
                         await fetchCategory(category, maxResults: maxPerCategory, lookbackDays: lookbackDays)
@@ -203,11 +286,11 @@ private enum ArxivFetcher {
         _ category: String,
         maxResults: Int,
         lookbackDays: Int
-    ) async -> (papers: [URL: ParsedPaper], succeeded: Bool) {
+    ) async -> (papers: [String: ParsedPaper], succeeded: Bool) {
         let batchSize = 100
         var start = 0
         let cutoff = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: Date()) ?? Date()
-        var accumulated: [URL: ParsedPaper] = [:]
+        var accumulated: [String: ParsedPaper] = [:]
         var succeeded = false
 
         while start < maxResults {
@@ -224,7 +307,7 @@ private enum ArxivFetcher {
             request.timeoutInterval = 20
 
             do {
-                let (data, _) = try await URLSession.shared.data(for: request)
+                let data = try await fetchData(request)
                 succeeded = true
                 let urlsBefore = Set(accumulated.keys)
 
@@ -255,7 +338,7 @@ private enum ArxivFetcher {
     // "Lastname, Firstname", so a quoted full-name search misses common
     // first-name variants ("Ed Witten" vs "Edward Witten"). We cast a wide
     // net here and let the caller filter on the client side.
-    static func fetchByAuthor(lastName: String, maxResults: Int = 100) async -> [URL: ParsedPaper] {
+    static func fetchByAuthor(lastName: String, maxResults: Int = 100) async -> [String: ParsedPaper] {
         let trimmed = lastName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [:] }
 
@@ -278,7 +361,7 @@ private enum ArxivFetcher {
         request.timeoutInterval = 15
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let data = try await fetchData(request)
             return ArxivPageParser().parse(data)
         } catch {
             #if DEBUG
@@ -288,9 +371,9 @@ private enum ArxivFetcher {
         }
     }
 
-    private static func mergePapers(_ source: [URL: ParsedPaper], into target: inout [URL: ParsedPaper]) {
-        for (url, paper) in source {
-            if var existing = target[url] {
+    private static func mergePapers(_ source: [String: ParsedPaper], into target: inout [String: ParsedPaper]) {
+        for (key, paper) in source {
+            if var existing = target[key] {
                 existing.categories.formUnion(paper.categories)
                 if existing.primaryCategory == nil || existing.primaryCategory?.isEmpty == true {
                     existing.primaryCategory = paper.primaryCategory
@@ -305,9 +388,9 @@ private enum ArxivFetcher {
                 } else if existing.submittedDate == nil {
                     existing.submittedDate = paper.submittedDate
                 }
-                target[url] = existing
+                target[key] = existing
             } else {
-                target[url] = paper
+                target[key] = paper
             }
         }
     }
@@ -344,12 +427,13 @@ final class NetworkManager {
 
         do {
             let stored = try modelContext.fetch(FetchDescriptor<Paper>())
-            let storedByURL = Dictionary(uniqueKeysWithValues: stored.map { ($0.url, $0) })
+            let storedByKey = Dictionary(stored.map { (arxivDedupKey(for: $0.url), $0) },
+                                         uniquingKeysWith: { first, _ in first })
 
             for parsed in matching {
                 guard let url = parsed.url else { continue }
 
-                if let existing = storedByURL[url] {
+                if let existing = storedByKey[arxivDedupKey(for: url)] {
                     result.append(existing)
                 } else {
                     let paper = Paper(
@@ -496,7 +580,7 @@ final class NetworkManager {
 
     @discardableResult
     private func synchronizeWithStorage(
-        _ fetchedPapers: [URL: ParsedPaper],
+        _ fetchedPapers: [String: ParsedPaper],
         trackedCategories: Set<String>,
         lookbackDays: Int
     ) -> Int {
@@ -506,16 +590,24 @@ final class NetworkManager {
             let cutoff = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: Date()) ?? Date()
 
             var stored: [Paper] = try modelContext.fetch(FetchDescriptor<Paper>())
-            let storedByURL = Dictionary(uniqueKeysWithValues: stored.map { ($0.url, $0) })
+            let storedByKey = Dictionary(stored.map { (arxivDedupKey(for: $0.url), $0) },
+                                         uniquingKeysWith: { first, _ in first })
 
             for parsed in fetchedPapers.values {
                 guard let url = parsed.url, let updatedDate = parsed.updatedDate else { continue }
+                let key = arxivDedupKey(for: url)
 
-                if updatedDate < cutoff, storedByURL[url]?.saved != true {
+                if updatedDate < cutoff, storedByKey[key]?.saved != true {
                     continue
                 }
 
-                if let existing = storedByURL[url] {
+                if let existing = storedByKey[key] {
+                    // A new version (…v2) keeps the same dedup key; point the
+                    // stored row at the newest URL and flag it as an update.
+                    if existing.url != url {
+                        existing.url = url
+                        existing.isUpdate = true
+                    }
                     existing.categories = Array(Set(existing.categories + Array(parsed.categories)))
 
                     if (existing.primaryCategory.isEmpty || existing.primaryCategory.lowercased() == "unknown"),
@@ -528,9 +620,11 @@ final class NetworkManager {
                         existing.isCrosslist = !trackedCategories.contains(primary)
                     }
 
-                    if updatedDate > existing.date {
-                        existing.date = Self.announcementDate(from: updatedDate)
-                    }
+                    // Recompute unconditionally: announcementDate is a pure function
+                    // of updatedDate, so this is idempotent — and it re-buckets rows
+                    // stored under the old ET-midnight convention onto the correct
+                    // local day after a timezone-related fix or move.
+                    existing.date = Self.announcementDate(from: updatedDate)
                 } else {
                     let primary = (parsed.primaryCategory ?? "").lowercased()
                     let isCrosslist = !primary.isEmpty && !trackedCategories.contains(primary)
@@ -596,7 +690,14 @@ final class NetworkManager {
 
         // Step 2: listing date = next business day after announcement
         let listingDate = Self.nextBusinessDay(after: announceDay, calendar: calendar)
-        return calendar.startOfDay(for: listingDate)
+
+        // The listing *day* is defined by arXiv in ET, but views bucket papers
+        // by the user's local calendar (HomeView's "today" query, DailyPapersView's
+        // grouping). Materialize the ET year/month/day as local midnight so the
+        // paper lands under the correct day in any timezone — midnight ET would
+        // read as the previous day west of ET.
+        let dayComps = calendar.dateComponents([.year, .month, .day], from: listingDate)
+        return Calendar.current.date(from: dayComps) ?? calendar.startOfDay(for: listingDate)
     }
 
     private nonisolated static func nextBusinessDay(after date: Date, calendar: Calendar) -> Date {

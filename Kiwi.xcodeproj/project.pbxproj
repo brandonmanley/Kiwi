@@ -351,6 +351,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = miso.Kiwi;
+				PRODUCT_MODULE_NAME = Kiwi;
 				PRODUCT_NAME = "Kiwi: Daily scientific papers";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -384,6 +385,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = miso.Kiwi;
+				PRODUCT_MODULE_NAME = Kiwi;
 				PRODUCT_NAME = "Kiwi: Daily scientific papers";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -531,7 +533,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kiwi.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Kiwi";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kiwi: Daily scientific papers.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Kiwi: Daily scientific papers";
 			};
 			name = Debug;
 		};
@@ -552,7 +554,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kiwi.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Kiwi";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Kiwi: Daily scientific papers.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Kiwi: Daily scientific papers";
 			};
 			name = Release;
 		};
