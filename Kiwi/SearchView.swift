@@ -338,7 +338,7 @@ struct SearchView: View {
     private var bottomBar: some View {
         HStack {
             Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                 ? "\(items.count) papers"
+                 ? "\(items.count) \(items.count == 1 ? "paper" : "papers")"
                  : "\(items.count) matches")
                 .font(.custom("Pulang", size: 14, relativeTo: .subheadline))
                 .foregroundColor(KiwiColors.darkBrown)

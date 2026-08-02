@@ -67,6 +67,7 @@ struct PaperScaffold<
                 List(items, id: \.self) { item in
                     row(item)
                         .listRowBackground(Color.clear)
+                        .listRowSeparatorTint(KiwiColors.darkBrown.opacity(0.35))
                 }
                 .scrollContentBackground(.hidden)
                 .listStyle(.plain)

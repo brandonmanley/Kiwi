@@ -113,7 +113,7 @@ final class PaperSyncService: ObservableObject {
 
         if result.added > 0 {
             if showMessages {
-                uiState?.flashRefreshMessage("Added \(result.added) papers!")
+                uiState?.flashRefreshMessage("Added \(result.added) \(result.added == 1 ? "paper" : "papers")!")
             }
             return .added(result.added)
         }

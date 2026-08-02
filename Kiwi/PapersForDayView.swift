@@ -286,7 +286,7 @@ struct PapersForDayView: View {
 
             Spacer()
 
-            Text("\(activeCount) papers")
+            Text("\(activeCount) \(activeCount == 1 ? "paper" : "papers")")
                 .font(.custom("Pulang", size: 14, relativeTo: .subheadline))
                 .foregroundColor(KiwiColors.darkBrown)
         }

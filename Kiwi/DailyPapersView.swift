@@ -151,7 +151,7 @@ private struct DayShelfRow: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("\(paperCount) papers")
+                    Text("\(paperCount) \(paperCount == 1 ? "paper" : "papers")")
                         .font(.custom("Pulang", size: 16, relativeTo: .headline))
                         .foregroundColor(KiwiColors.darkBrown.opacity(clicked ? 0.65 : 0.90))
 
@@ -163,10 +163,6 @@ private struct DayShelfRow: View {
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(KiwiColors.creamWhite.opacity(0.70))
-        )
     }
 
     private var shelfView: some View {

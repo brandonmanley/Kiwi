@@ -526,29 +526,30 @@ final class NetworkManager {
         return calendar.date(bySettingHour: 20, minute: 0, second: 0, of: next) ?? next
     }
 
+    // The announcement instant is fixed by arXiv (20:00 ET), but the message
+    // shows it in the phone's timezone — "today"/"tomorrow" and the clock time
+    // are computed on the user's local calendar.
     nonisolated static func friendlyNextAnnouncement(from date: Date = Date()) -> String {
         let next = nextAnnouncement(after: date)
-        let etZone = TimeZone(identifier: "America/New_York")!
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = etZone
+        let calendar = Calendar.current
 
         let nowDay = calendar.startOfDay(for: date)
         let nextDay = calendar.startOfDay(for: next)
         let dayDiff = calendar.dateComponents([.day], from: nowDay, to: nextDay).day ?? 0
 
         let timeFormatter = DateFormatter()
-        timeFormatter.timeZone = etZone
+        timeFormatter.timeZone = .current
         timeFormatter.dateFormat = "h a"
         let timeString = timeFormatter.string(from: next)
 
         switch dayDiff {
-        case 0: return "next batch \(timeString) ET"
-        case 1: return "next batch tomorrow \(timeString) ET"
+        case 0: return "next batch \(timeString)"
+        case 1: return "next batch tomorrow \(timeString)"
         default:
             let weekdayFormatter = DateFormatter()
-            weekdayFormatter.timeZone = etZone
+            weekdayFormatter.timeZone = .current
             weekdayFormatter.dateFormat = "EEEE"
-            return "next batch \(weekdayFormatter.string(from: next)) \(timeString) ET"
+            return "next batch \(weekdayFormatter.string(from: next)) \(timeString)"
         }
     }
 

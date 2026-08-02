@@ -413,7 +413,7 @@ struct AuthorView: View {
 
     private var bottomBar: some View {
         HStack {
-            Text("\(papers.count) papers")
+            Text("\(papers.count) \(papers.count == 1 ? "paper" : "papers")")
                 .font(.custom("Pulang", size: 14, relativeTo: .subheadline))
                 .foregroundColor(KiwiColors.darkBrown)
 
