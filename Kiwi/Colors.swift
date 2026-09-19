@@ -24,11 +24,13 @@ extension Color {
 import SwiftUI
 
 struct KiwiColors {
-    static let lightGreen  = Color(hex: "#e2f7c3")
-    static let lightBrown  = Color(hex: "#563429")
-    static let darkGreen   = Color(hex: "#61AB5A")
-
-    // These two become dynamic via Color Assets:
+    // All five are now dynamic (light/dark) via the asset catalog, so the drawer,
+    // filter chips, and backgrounds follow the color scheme instead of staying
+    // bright. `lightBrown` was misnamed — it is #563429, a dark brown — and is
+    // now `deepBrown`.
+    static let lightGreen  = Color("KiwiLightGreen")
+    static let deepBrown   = Color("KiwiDeepBrown")
+    static let darkGreen   = Color("KiwiDarkGreen")
     static let creamWhite  = Color("KiwiCreamWhite")
     static let darkBrown   = Color("KiwiDarkBrown")
 }

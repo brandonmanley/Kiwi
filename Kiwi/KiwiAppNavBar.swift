@@ -61,7 +61,10 @@ struct KiwiNavBar<Title: View, Left: View, Right: View>: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(KiwiColors.creamWhite)
+        // Transparent over the screen's gradient — an opaque cream fill produced a
+        // visible seam where the bar met the gradient below it. The buttons keep
+        // their own cream circles for legibility.
+        .background(Color.clear)
     }
 }
 

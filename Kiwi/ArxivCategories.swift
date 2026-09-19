@@ -77,6 +77,9 @@ enum ArxivCategories {
         "gr-qc": "General Relativity & Quantum Cosmology",
         "quant-ph": "Quantum Physics",
         "math-ph": "Mathematical Physics",
+        // Family headers for the grouped views (keyed by groupKey, below).
+        "hep": "High Energy Physics",
+        "nucl": "Nuclear Physics",
     ]
 
     static func displayName(for category: String) -> String {
@@ -89,10 +92,23 @@ enum ArxivCategories {
         "gr-qc", "math-ph", "nlin", "physics"
     ]
 
-    static func grouped() -> [(key: String, values: [String])] {
-        let groups = Dictionary(grouping: all) { cat in
-            cat.split(separator: ".").first.map(String.init) ?? "other"
+    // Maps a category to its family. Dotted categories use the prefix before the
+    // dot; the flat `hep-*` and `nucl-*` families collapse to "hep"/"nucl" (which
+    // is what groupOrder expects); everything else is its own group. Keying on
+    // `split(".").first` alone left hep-ph/hep-th/nucl-th as singleton groups that
+    // matched nothing in groupOrder and sank to the bottom alphabetically.
+    static func groupKey(for category: String) -> String {
+        let cat = category.lowercased()
+        if let prefix = cat.split(separator: ".").first, cat.contains(".") {
+            return String(prefix)
         }
+        if cat.hasPrefix("hep-") { return "hep" }
+        if cat.hasPrefix("nucl-") { return "nucl" }
+        return cat
+    }
+
+    static func grouped() -> [(key: String, values: [String])] {
+        let groups = Dictionary(grouping: all) { groupKey(for: $0) }
         return groups
             .map { (key: $0.key, values: $0.value.sorted()) }
             .sorted { a, b in

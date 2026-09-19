@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var settingsStore: SettingsStore
+    @EnvironmentObject private var syncService: PaperSyncService
 
     // MARK: - Local UI state
     @State private var localSelected: Set<String> = []
@@ -23,7 +24,8 @@ struct SettingsView: View {
         return "Version \(version) (\(build))"
     }
 
-    @State private var showMustUpdateAlert = false
+    @State private var showLeaveDialog = false
+    @State private var showNotifDeniedHint = false
 
     private var allCategories: [String] { ArxivCategories.all }
     private var groupedCategories: [(key: String, values: [String])] { ArxivCategories.grouped() }
@@ -65,6 +67,7 @@ struct SettingsView: View {
                     },
                     right: {
                         Button {
+                            softHaptic()
                             showBetaInfo = true
                         } label: {
                             Image(systemName: "info.circle")
@@ -81,35 +84,85 @@ struct SettingsView: View {
                         .opacity(isUpdatingPapers ? 0.35 : 1.0)
                     }
                 )
-                .background(.ultraThinMaterial) // matches your new translucent direction
-                
+                // Transparent over the screen gradient, matching every other
+                // screen's KiwiNavBar — the ultraThinMaterial fill here read as a
+                // slightly different shade at the top than Home/Reading list.
+
                 ScrollView {
                     VStack(spacing: 14) {
                         
                         // --- App preferences card ---
                         settingsCard(title: "Preferences") {
                             VStack(spacing: 10) {
-                                
+
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Appearance")
+                                            .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                                            .foregroundColor(KiwiColors.darkBrown)
+                                        Text("Follow the system, or force light / dark")
+                                            .font(.system(.caption, design: .rounded, weight: .medium))
+                                            .foregroundColor(KiwiColors.darkBrown.opacity(0.60))
+                                    }
+                                    Spacer()
+                                    Picker("Appearance", selection: Binding(
+                                        get: { settingsStore.appearance },
+                                        set: { settingsStore.setAppearance($0); softHaptic() }
+                                    )) {
+                                        ForEach(SettingsStore.Appearance.allCases) { option in
+                                            Text(option.label).tag(option)
+                                        }
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .frame(width: 180)
+                                }
+
                                 toggleRow(
-                                    title: "Dark mode",
-                                    subtitle: "Swap cream / brown colors",
+                                    title: "Haptics",
+                                    subtitle: "Vibration feedback on actions",
                                     isOn: Binding(
-                                        get: { settingsStore.darkModeEnabled },
-                                        set: { settingsStore.setDarkModeEnabled($0) }
+                                        get: { !settingsStore.hapticsDisabled },
+                                        set: { settingsStore.setHapticsDisabled(!$0) }
                                     )
                                 )
                             }
                         }
                         
+                        // --- Notifications card ---
+                        settingsCard(title: "Notifications") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Off, a daily summary at the announcement time, or an alert when new papers match your keywords.")
+                                    .font(.system(.caption, design: .rounded, weight: .medium))
+                                    .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
+
+                                HStack {
+                                    Text("Mode")
+                                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                                        .foregroundColor(KiwiColors.darkBrown)
+                                    Spacer()
+                                    Picker("Notifications", selection: Binding(
+                                        get: { settingsStore.notificationMode },
+                                        set: { handleNotificationModeChange($0) }
+                                    )) {
+                                        ForEach(SettingsStore.NotificationMode.allCases) { mode in
+                                            Text(mode.label).tag(mode)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .tint(KiwiColors.darkBrown)
+                                }
+                            }
+                        }
+
                         // --- Daily papers card ---
                         settingsCard(title: "Daily papers") {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Days to show")
-                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
                                         .foregroundColor(KiwiColors.darkBrown)
                                     Text("Number of days in the daily view (1–21)")
-                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .font(.system(.caption, design: .rounded, weight: .medium))
                                         .foregroundColor(KiwiColors.darkBrown.opacity(0.60))
                                 }
                                 Spacer()
@@ -117,7 +170,8 @@ struct SettingsView: View {
                                     get: { settingsStore.dailyPapersDays },
                                     set: { settingsStore.setDailyPapersDays($0) }
                                 ), in: 1...21)
-                                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                .onChange(of: settingsStore.dailyPapersDays) { softHaptic() }
+                                .font(.system(.subheadline, design: .rounded, weight: .semibold))
                                 .foregroundColor(KiwiColors.darkBrown)
                                 .frame(width: 140)
                             }
@@ -128,7 +182,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 10) {
                                 
                                 Text("Prioritize papers matching these terms in title, authors, or abstract.")
-                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                    .font(.system(.caption, design: .rounded, weight: .medium))
                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
                                 
                                 // Input row
@@ -136,7 +190,7 @@ struct SettingsView: View {
                                     TextField("Add keyword", text: $keywordText)
                                         .textInputAutocapitalization(.never)
                                         .autocorrectionDisabled()
-                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
                                         .padding(.vertical, 8)
                                         .padding(.horizontal, 10)
                                         .background(
@@ -169,7 +223,7 @@ struct SettingsView: View {
                                         ForEach(settingsStore.keywords, id: \.self) { kw in
                                             HStack(spacing: 6) {
                                                 Text(kw.lowercased())
-                                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                                    .font(.system(.caption, design: .rounded, weight: .medium))
                                                     .foregroundColor(KiwiColors.darkBrown)
 
                                                 Spacer()
@@ -203,7 +257,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 12) {
                                 HStack {
                                     Text("\(localSelected.count) selected")
-                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
                                         .foregroundColor(KiwiColors.darkBrown.opacity(0.85))
                                     Spacer()
                                     
@@ -213,7 +267,7 @@ struct SettingsView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.9))
-                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
                                     
                                     Text("·")
                                         .foregroundColor(KiwiColors.darkBrown.opacity(0.35))
@@ -224,7 +278,7 @@ struct SettingsView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.9))
-                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
                                 }
                                 
                                 ForEach(groupedCategories, id: \.key) { group in
@@ -240,11 +294,11 @@ struct SettingsView: View {
                                         } label: {
                                             HStack {
                                                 Text(displayName(for: group.key))
-                                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
                                                     .foregroundColor(KiwiColors.darkBrown)
                                                 Spacer()
                                                 Text("\(group.values.filter { localSelected.contains($0) }.count)")
-                                                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                                                    .font(.system(.footnote, design: .rounded, weight: .medium))
                                                     .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
                                             }
                                             .padding(.vertical, 6)
@@ -264,7 +318,7 @@ struct SettingsView: View {
                 .safeAreaInset(edge: .bottom) {
                     if hasChanges {
                         Button {
-                            Task { await updatePapersAndCommit() }
+                            commitAndSync()
                         } label: {
                             HStack {
                                 Spacer()
@@ -272,7 +326,7 @@ struct SettingsView: View {
                                     ProgressView().tint(KiwiColors.darkBrown)
                                 } else {
                                     Text(localSelected.isEmpty ? "Select at least one category" : "Update papers")
-                                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                                        .font(.system(.callout, design: .rounded, weight: .semibold))
                                         .foregroundColor(KiwiColors.darkBrown)
                                 }
                                 Spacer()
@@ -306,12 +360,22 @@ struct SettingsView: View {
             localSelected = Set(settingsStore.selectedCategories)
             originalSelected = localSelected
         }
-        .alert("Update required", isPresented: $showMustUpdateAlert) {
+        .confirmationDialog("You changed categories", isPresented: $showLeaveDialog, titleVisibility: .visible) {
+            Button("Update papers") { commitAndSync() }
+            Button("Discard changes", role: .destructive) {
+                localSelected = originalSelected
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Apply your category changes, or discard them?")
+        }
+        .alert("Notifications are off", isPresented: $showNotifDeniedHint) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("You changed categories. Tap “Update papers” at the bottom to apply changes.")
+            Text("Enable notifications for Kiwi in the Settings app to use this.")
         }
-        
+
     }
 
     // MARK: - UI helpers
@@ -319,7 +383,7 @@ struct SettingsView: View {
     private func settingsCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .font(.system(.title3, design: .rounded, weight: .semibold))
                 .foregroundColor(KiwiColors.darkBrown)
 
             content()
@@ -339,11 +403,11 @@ struct SettingsView: View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
                     .foregroundColor(KiwiColors.darkBrown)
 
                 Text(subtitle)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .font(.system(.caption, design: .rounded, weight: .medium))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.60))
             }
             Spacer()
@@ -373,14 +437,14 @@ struct SettingsView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(long)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .font(.system(.caption, design: .rounded, weight: .medium))
                         .multilineTextAlignment(.leading)
                         .lineLimit(nil)                      // allow wrapping
                         .fixedSize(horizontal: false, vertical: true)
 
                     // Optional: keep the arXiv code visible but subtle
                     Text(category.lowercased())
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .font(.system(.caption2, design: .rounded, weight: .medium))
                         .foregroundColor((selected ? KiwiColors.creamWhite : KiwiColors.darkBrown).opacity(0.75))
                 }
 
@@ -399,31 +463,62 @@ struct SettingsView: View {
     // MARK: - Leave / Update behavior
 
     private func attemptLeave() {
-        // Hard rule: cannot leave while dirty.
+        // The user can always leave now — a confirmation dialog offers to apply
+        // or discard, instead of the old back-button block that trapped them.
         if hasChanges {
-            showMustUpdateAlert = true
+            showLeaveDialog = true
         } else {
             dismiss()
         }
     }
 
-    private func updatePapersAndCommit() async {
-        guard !isUpdatingPapers else { return }
+    // Requests authorization only when the user opts in; a denial degrades quietly
+    // (reverts to Off + a one-time hint) rather than nagging.
+    private func handleNotificationModeChange(_ mode: SettingsStore.NotificationMode) {
+        softHaptic()
+        if mode == .off {
+            settingsStore.setNotificationMode(.off)
+            NotificationManager.cancelAll()
+            return
+        }
+        Task {
+            let granted = await NotificationManager.requestAuthorization()
+            if granted {
+                settingsStore.setNotificationMode(mode)
+                if mode == .daily {
+                    await NotificationManager.scheduleDailySummary()
+                } else {
+                    // Keyword alerts are posted by background sync; no scheduled summary.
+                    NotificationManager.cancelAll()
+                }
+            } else {
+                settingsStore.setNotificationMode(.off)
+                showNotifDeniedHint = true
+            }
+        }
+    }
+
+    // Commit the selection and kick off the sync through the shared service, then
+    // dismiss immediately — the toast (with its progress counter and coalescing)
+    // handles feedback, so we don't block behind an in-view spinner.
+    private func commitAndSync() {
         guard !localSelected.isEmpty else { return }
+        softHaptic()
+        let selected = Array(localSelected)
 
-        isUpdatingPapers = true
-        defer { isUpdatingPapers = false }
-
-        // Commit categories first
-        settingsStore.setSelectedCategories(Array(localSelected))
-
-        // Sync papers
-        let manager = NetworkManager(context: modelContext)
-        await manager.syncPapers(for: Array(localSelected))
-
-        // Changes are now “accepted”
+        settingsStore.setSelectedCategories(selected)
         originalSelected = localSelected
 
+        let context = modelContext
+        let store = settingsStore
+        Task {
+            let outcome = await syncService.sync(context: context, categories: selected)
+            switch outcome {
+            case .added:            Haptics.notification(.success, store: store)
+            case .failed, .offline: Haptics.notification(.error, store: store)
+            default:                break
+            }
+        }
         dismiss()
     }
 
@@ -464,13 +559,13 @@ struct SettingsView: View {
                     }
 
                     Text("Thanks for testing Kiwi.")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .font(.system(.footnote, design: .rounded, weight: .medium))
                         .foregroundColor(KiwiColors.darkBrown.opacity(0.80))
 
 //                    Divider().opacity(0.25)
 
                     Text(buildString)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .font(.system(.footnote, design: .rounded, weight: .medium))
                         .foregroundColor(KiwiColors.darkBrown.opacity(0.85))
                 }
                 .padding(14)

@@ -65,10 +65,10 @@ struct DailyPapersView: View {
                         VStack(spacing: 10) {
                             Spacer(minLength: 140)
                             Text("No papers to show")
-                                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                                .font(.system(.title3, design: .rounded, weight: .semibold))
                                 .foregroundColor(KiwiColors.darkBrown)
                             Text("Pull to refresh, or update categories in Settings.")
-                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                .font(.system(.subheadline, design: .rounded, weight: .semibold))
                                 .foregroundColor(KiwiColors.darkBrown.opacity(0.75))
                             Spacer(minLength: 400)
                         }
@@ -85,7 +85,7 @@ struct DailyPapersView: View {
                         LazyVStack(spacing: 14) {
                             ForEach(days, id: \.day) { entry in
                                 NavigationLink {
-                                    PapersForDayView(papers: entry.papers, day: entry.day)
+                                    PapersForDayView(day: entry.day)
                                 } label: {
                                     DayShelfRow(
                                         day: entry.day,
@@ -144,7 +144,7 @@ private struct DayShelfRow: View {
                         .foregroundColor(KiwiColors.darkBrown)
 
                     Text(day.formatted(.dateTime.month(.abbreviated).day().year()))
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .font(.system(.caption, design: .rounded, weight: .medium))
                         .foregroundColor(KiwiColors.darkBrown.opacity(0.70))
                 }
 
@@ -156,7 +156,7 @@ private struct DayShelfRow: View {
                         .foregroundColor(KiwiColors.darkBrown.opacity(clicked ? 0.65 : 0.90))
 
                     Text(triageEstimate)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .font(.system(.caption, design: .rounded, weight: .medium))
                         .foregroundColor(KiwiColors.darkBrown.opacity(0.70))
                 }
             }

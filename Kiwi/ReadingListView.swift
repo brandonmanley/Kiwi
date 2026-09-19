@@ -9,18 +9,32 @@ enum ReadingListSort: String, CaseIterable {
     case author = "Author"
 }
 
+enum ReadingListFilter: String, CaseIterable {
+    case all = "All"
+    case unread = "Unread"
+    case pinned = "Pinned"
+}
+
 struct ReadingListView: View {
     @State private var selectedURL: IdentifiableURL?
     @State private var shareURL: IdentifiableURL?
     @State private var expandedPaperID: Paper.ID?
     @State private var sortOption: ReadingListSort = .recent
+    @State private var filter: ReadingListFilter = .all
+    @State private var exportURL: IdentifiableURL?
 
     @Query private var papers: [Paper]
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var settingsStore: SettingsStore
+    @EnvironmentObject private var uiState: KiwiUIState
 
     private var savedPapers: [Paper] {
-        let saved = papers.filter { $0.saved }
+        var saved = papers.filter { $0.saved }
+        switch filter {
+        case .all: break
+        case .unread: saved = saved.filter { !$0.isRead }
+        case .pinned: saved = saved.filter { $0.pinned }
+        }
         switch sortOption {
         case .recent:
             return saved.sorted { a, b in
@@ -49,13 +63,18 @@ struct ReadingListView: View {
                     endPoint: .bottom
                 )
             },
-            header: { readingListNavBar },
+            header: {
+                VStack(spacing: 8) {
+                    readingListNavBar
+                    filterChips
+                }
+            },
             items: savedPapers,
             row: { paper in
                 paperRow(paper)
                     .contentShape(Rectangle())
                     .onLongPressGesture {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        Haptics.impact(.medium, store: settingsStore)
                         shareURL = IdentifiableURL(url: paper.url)
                     }
                     .onTapGesture {
@@ -63,9 +82,7 @@ struct ReadingListView: View {
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button(role: .destructive) {
-                            paper.saved = false
-                            paper.pinned = false
-                            paper.savedDate = nil
+                            removeWithUndo(paper)
                         } label: {
                             Label("Remove", systemImage: "minus")
                         }
@@ -93,6 +110,30 @@ struct ReadingListView: View {
                         }
                         .tint(.purple)
                     }
+                    .contextMenu {
+                        Button {
+                            paper.isRead.toggle()
+                            try? modelContext.save()
+                        } label: {
+                            Label(paper.isRead ? "Mark as unread" : "Mark as read",
+                                  systemImage: paper.isRead ? "circle" : "checkmark.circle")
+                        }
+                        Button {
+                            paper.pinned.toggle()
+                            try? modelContext.save()
+                        } label: {
+                            Label(paper.pinned ? "Unpin" : "Pin",
+                                  systemImage: paper.pinned ? "pin.slash" : "pin")
+                        }
+                        paperContextMenuItems(
+                            saved: true,
+                            onToggleSave: { removeWithUndo(paper) },
+                            onOpenArxiv: { selectedURL = IdentifiableURL(url: paper.url) },
+                            onOpenPDF: { selectedURL = IdentifiableURL(url: paper.url.arxivPDF) },
+                            onShare: { shareURL = IdentifiableURL(url: paper.url) },
+                            onCopyBibTeX: { UIPasteboard.general.string = Citation.bibtex(for: paper) }
+                        )
+                    }
             },
             emptyState: { emptyState },
             bottomOverlay: { EmptyView() }
@@ -104,9 +145,46 @@ struct ReadingListView: View {
             ShareSheet(items: [wrapper.url])
                 .presentationDetents([.medium])
         }
+        .sheet(item: $exportURL) { wrapper in
+            ShareSheet(items: [wrapper.url])
+        }
         .navigationBarBackButtonHidden(true)
     }
+
+    // Writes the current reading list to a temporary .bib file and hands it to
+    // the share sheet.
+    private func exportBib() {
+        let body = savedPapers.map { Citation.bibtex(for: $0) }.joined(separator: "\n\n")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("kiwi-reading-list.bib")
+        do {
+            try body.data(using: .utf8)?.write(to: url, options: .atomic)
+            exportURL = IdentifiableURL(url: url)
+        } catch {
+            #if DEBUG
+            print("⚠️ Failed to write .bib export: \(error)")
+            #endif
+        }
+    }
     
+    private var filterChips: some View {
+        HStack(spacing: 8) {
+            ForEach(ReadingListFilter.allCases, id: \.self) { f in
+                Button { filter = f } label: {
+                    Text(f.rawValue)
+                        .font(.system(.caption, design: .rounded, weight: .medium))
+                        .foregroundColor(filter == f ? KiwiColors.creamWhite : KiwiColors.darkBrown)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(filter == f ? KiwiColors.darkGreen : KiwiColors.creamWhite.opacity(0.75))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+    }
+
     // MARK: - Custom header with top-right toggle
     private var readingListNavBar: some View {
         KiwiNavBar(
@@ -130,6 +208,14 @@ struct ReadingListView: View {
                             }
                         }
                     }
+                    if !savedPapers.isEmpty {
+                        Divider()
+                        Button {
+                            exportBib()
+                        } label: {
+                            Label("Export reading list (.bib)", systemImage: "square.and.arrow.up")
+                        }
+                    }
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
                         .font(.system(size: 14, weight: .semibold))
@@ -147,15 +233,21 @@ struct ReadingListView: View {
         return VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .top) {
-                    LaTeX(paper.title)
+                    // Read papers are dimmed; unread carry a small green dot.
+                    MathText(paper.title)
                         .font(.subheadline)
-                        .foregroundColor(KiwiColors.darkBrown)
+                        .foregroundColor(KiwiColors.darkBrown.opacity(paper.isRead ? 0.5 : 1.0))
                         .fixedSize(horizontal: false, vertical: true)
-                        .parsingMode(.onlyEquations)
                         .allowsHitTesting(false)
 
                     Spacer()
 
+                    if !paper.isRead {
+                        Circle()
+                            .fill(KiwiColors.darkGreen)
+                            .frame(width: 7, height: 7)
+                            .accessibilityLabel("Unread")
+                    }
                     if paper.pinned {
                         Image(systemName: "pin.fill")
                             .font(.system(size: 12, weight: .semibold))
@@ -166,9 +258,9 @@ struct ReadingListView: View {
                 }
 
                 HStack(spacing: 4) {
-                    let allCats = [paper.primaryCategory] + paper.categories.filter { $0 != paper.primaryCategory }
-                    ForEach(Array(allCats.enumerated()), id: \.element) { index, cat in
-                        Text(cat.lowercased())
+                    let allCats = orderedCategories(primary: paper.primaryCategory, all: paper.categories)
+                    ForEach(Array(allCats.enumerated()), id: \.offset) { index, cat in
+                        Text(cat)
                             .font(.caption2)
                             .foregroundColor(KiwiColors.creamWhite)
                             .padding(.horizontal, 6)
@@ -189,7 +281,7 @@ struct ReadingListView: View {
 
                     if let label = daysOnListText(paper) {
                         Text(label)
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .font(.system(.caption2, design: .rounded, weight: .medium))
                             .foregroundColor(KiwiColors.darkBrown.opacity(0.55))
                     }
                 }
@@ -198,10 +290,9 @@ struct ReadingListView: View {
             if isExpanded {
                 Divider().background(KiwiColors.darkBrown.opacity(0.25))
 
-                LaTeX(paper.abstract)
+                MathText(paper.abstract)
                     .font(.caption2)
                     .foregroundColor(KiwiColors.creamWhite)
-                    .parsingMode(.onlyEquations)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(10)
                     .background(
@@ -209,10 +300,56 @@ struct ReadingListView: View {
                             .fill(KiwiColors.darkBrown)
                     )
                     .allowsHitTesting(false)
+
+                ExpandedPaperMeta(
+                    arxivID: Citation.arxivID(from: paper.url),
+                    submittedDate: paper.submittedDate,
+                    listingDate: paper.date,
+                    authors: paper.authors,
+                    comment: paper.comment,
+                    journalRef: paper.journalRef,
+                    doi: paper.doi
+                )
+
+                // Free-text note, persisted as the user types.
+                TextField("Add a note…", text: Binding(
+                    get: { paper.note },
+                    set: { paper.note = $0; try? modelContext.save() }
+                ), axis: .vertical)
+                .font(.system(.caption, design: .rounded))
+                .foregroundColor(KiwiColors.darkBrown)
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(KiwiColors.creamWhite.opacity(0.9))
+                )
             }
         }
         .padding(.vertical, 6)
         .listRowBackground(Color.clear)
+    }
+
+    // Full-swipe remove is destructive, so flash an Undo toast that restores the
+    // exact saved/pinned/savedDate state. The row is only unsaved, never deleted,
+    // so the reference stays valid for the restore closure.
+    private func removeWithUndo(_ paper: Paper) {
+        let wasPinned = paper.pinned
+        let priorSavedDate = paper.savedDate
+
+        paper.saved = false
+        paper.pinned = false
+        paper.savedDate = nil
+        try? modelContext.save()
+        Haptics.notification(.warning, store: settingsStore)
+
+        uiState.flashRefreshMessage("Removed from reading list", duration: 4,
+            action: .init(label: "Undo") {
+                paper.saved = true
+                paper.pinned = wasPinned
+                paper.savedDate = priorSavedDate ?? Date()
+                try? modelContext.save()
+            }
+        )
     }
 
     private func daysOnListText(_ paper: Paper) -> String? {
@@ -235,7 +372,7 @@ struct ReadingListView: View {
             Spacer()
             Text("No papers saved yet…")
                 .foregroundColor(KiwiColors.darkBrown)
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .font(.system(.headline, design: .rounded, weight: .semibold))
             Spacer()
         }
         .padding(.horizontal)

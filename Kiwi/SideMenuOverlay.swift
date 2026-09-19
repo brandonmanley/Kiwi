@@ -19,12 +19,12 @@ struct SideMenuOverlay: View {
     var body: some View {
         ZStack(alignment: .leading) {
 
-            // Scrim (tap to close)
+            // Scrim (visual dim only). Tap-to-close is owned by RootView's overlay
+            // over the shifted content, so this no longer installs its own handler.
             Color.black
                 .opacity(uiState.isMenuOpen ? 0.25 : 0.0)
                 .ignoresSafeArea()
-                .allowsHitTesting(uiState.isMenuOpen)
-                .onTapGesture { close(animated: true) }
+                .allowsHitTesting(false)
                 .animation(drawerAnim, value: uiState.isMenuOpen)
 
             // Menu panel
@@ -59,9 +59,7 @@ struct SideMenuOverlay: View {
                 Spacer()
                 
                 Button {
-                    let generator = UIImpactFeedbackGenerator(style: .light)
-                    generator.prepare()
-                    generator.impactOccurred(intensity: 0.8)
+                    Haptics.impact(.light, intensity: 0.8, store: settingsStore)
                     Task { @MainActor in
                         withAnimation(.easeInOut(duration: 0.09)) { kiwiWiggle = -14 }
                         try? await Task.sleep(nanoseconds: 90_000_000)
@@ -196,7 +194,7 @@ struct SideMenuOverlay: View {
                 .frame(width: 22)
 
             Text(title)
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .font(.system(.headline, design: .rounded, weight: .semibold))
         }
         .foregroundColor(KiwiColors.darkBrown)
         .padding(.vertical, 10)
@@ -235,8 +233,6 @@ struct SideMenuOverlay: View {
 
     private func hapticMenuToggled(isOpen: Bool) {
         // One light impact on open + close
-        let generator = UIImpactFeedbackGenerator(style: .light)
-        generator.prepare()
-        generator.impactOccurred(intensity: isOpen ? 0.9 : 0.6)
+        Haptics.impact(.light, intensity: isOpen ? 0.9 : 0.6, store: settingsStore)
     }
 }

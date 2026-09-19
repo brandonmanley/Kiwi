@@ -25,4 +25,12 @@ final class KiwiRouter: ObservableObject {
         path.append(route)
         currentRoute = route
     }
+
+    // Keep `currentRoute` honest when the path changes outside `go`/`goHome`
+    // (a custom chevron's dismiss, or an edge-swipe back). The app only ever
+    // pushes one level deep, so an empty path means we're back on Home.
+    // RootView drives this from `.onChange(of: path.count)`.
+    func reconcileWithPath() {
+        if path.isEmpty { currentRoute = nil }
+    }
 }

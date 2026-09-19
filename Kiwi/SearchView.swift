@@ -9,12 +9,16 @@ struct SearchView: View {
     @Query(sort: \Paper.date, order: .reverse)
     private var papers: [Paper]
 
+    @EnvironmentObject private var settingsStore: SettingsStore
+
     @State private var query: String = ""
     @State private var expandedPaperID: UUID?
     @State private var selectedURL: IdentifiableURL?
+    @State private var shareURL: IdentifiableURL?
     @State private var debouncedQuery: String = ""
     @State private var resultIDs: [UUID] = []
     @State private var searchTask: Task<Void, Never>?
+    @State private var debounceTask: Task<Void, Never>?
 
     enum Scope: String, CaseIterable {
         case all = "All"
@@ -45,6 +49,24 @@ struct SearchView: View {
         return resultIDs.compactMap { byID[$0].map(PaperRowItem.init) }
     }
 
+    // Query words to highlight in results.
+    private var queryTerms: [String] {
+        query.split(separator: " ").map(String.init).filter { $0.count >= 2 }
+    }
+
+    // arXiv web search for the current query — the escape hatch when the local
+    // cache has no match.
+    private var arxivSearchURL: URL? {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return nil }
+        var components = URLComponents(string: "https://arxiv.org/search/")
+        components?.queryItems = [
+            URLQueryItem(name: "query", value: q),
+            URLQueryItem(name: "searchtype", value: "all"),
+        ]
+        return components?.url
+    }
+
     var body: some View {
         PaperScaffold(
             background: { KiwiColors.creamWhite },
@@ -62,10 +84,7 @@ struct SearchView: View {
                         Button {
                             item.paper.saved.toggle()
                             item.paper.savedDate = item.paper.saved ? Date() : nil
-                            Task { @MainActor in
-                                let generator = UINotificationFeedbackGenerator()
-                                generator.notificationOccurred(item.paper.saved ? .success : .warning)
-                            }
+                            Haptics.notification(item.paper.saved ? .success : .warning, store: settingsStore)
                         } label: {
                             Label(item.paper.saved ? "Remove" : "Save",
                                   systemImage: item.paper.saved ? "checkmark" : "plus")
@@ -87,6 +106,20 @@ struct SearchView: View {
                         }
                         .tint(.purple)
                     }
+                    .contextMenu {
+                        paperContextMenuItems(
+                            saved: item.paper.saved,
+                            onToggleSave: {
+                                item.paper.saved.toggle()
+                                item.paper.savedDate = item.paper.saved ? Date() : nil
+                                Haptics.notification(item.paper.saved ? .success : .warning, store: settingsStore)
+                            },
+                            onOpenArxiv: { selectedURL = IdentifiableURL(url: item.paper.url) },
+                            onOpenPDF: { selectedURL = IdentifiableURL(url: item.paper.url.arxivPDF) },
+                            onShare: { shareURL = IdentifiableURL(url: item.paper.url) },
+                            onCopyBibTeX: { UIPasteboard.general.string = Citation.bibtex(for: item.paper) }
+                        )
+                    }
             },
             emptyState: { emptyState },
             bottomOverlay: {
@@ -99,12 +132,18 @@ struct SearchView: View {
         .sheet(item: $selectedURL) { wrapper in
             SafariView(url: wrapper.url)
         }
+        .sheet(item: $shareURL) { wrapper in
+            ShareSheet(items: [wrapper.url])
+                .presentationDetents([.medium])
+        }
         .navigationBarBackButtonHidden(true)
         .task { scheduleSearch() }
         .onChange(of: debouncedQuery) { _, _ in scheduleSearch() }
         .onChange(of: scope) { _, _ in scheduleSearch() }
         .onChange(of: savedOnly) { _, _ in scheduleSearch() }
-        .onChange(of: papers.count) { _, _ in scheduleSearch() } // keeps results in sync after syncPapers
+        // Trigger on the papers array itself, not just its count — a sync that
+        // replaces/updates rows without changing the count still refreshes results.
+        .onChange(of: papers) { _, _ in scheduleSearch() }
     }
 
 
@@ -123,17 +162,19 @@ struct SearchView: View {
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.65))
 
                 TextField("Search titles, authors, abstracts…", text: $query)
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
                     .foregroundColor(KiwiColors.darkBrown)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                     .submitLabel(.search)
                     .onChange(of: query) { _, newValue in
-                        let q = newValue
-                        Task { @MainActor in
-                            // cancel/replace simple debounce
+                        // Single cancellable debounce task instead of one stacked
+                        // task per keystroke.
+                        debounceTask?.cancel()
+                        debounceTask = Task { @MainActor in
                             try? await Task.sleep(nanoseconds: 160_000_000) // 160ms
-                            if query == q { debouncedQuery = q }
+                            guard !Task.isCancelled else { return }
+                            debouncedQuery = newValue
                         }
                     }
 
@@ -163,7 +204,7 @@ struct SearchView: View {
                     ForEach(Scope.allCases, id: \.self) { s in
                         Button { scope = s } label: {
                             Text(s.rawValue)
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .font(.system(.caption, design: .rounded, weight: .medium))
                                 .foregroundColor(scope == s ? KiwiColors.creamWhite : KiwiColors.darkBrown)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
@@ -181,7 +222,7 @@ struct SearchView: View {
                             Image(systemName: savedOnly ? "bookmark.fill" : "bookmark")
                             Text("Saved")
                         }
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .font(.system(.caption, design: .rounded, weight: .medium))
                         .foregroundColor(savedOnly ? KiwiColors.creamWhite : KiwiColors.darkBrown)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -198,34 +239,48 @@ struct SearchView: View {
     }
     
     
+    // Lightweight, Sendable per-paper record carrying cached tokens, so scoring
+    // can run off the main actor without re-tokenizing.
+    private struct SearchDoc: Sendable {
+        let id: UUID
+        let date: Date
+        let saved: Bool
+        let isUpdate: Bool
+        let isCross: Bool
+        let tokens: TokenCache.Tokens
+    }
+
     private func scheduleSearch() {
         searchTask?.cancel()
+
+        let q = debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentScope = scope
+        let saved = savedOnly
+
+        // Build the snapshot on the main actor, pulling token sets from the cache
+        // (cheap after the first build). Live `saved`/`isUpdate` are read here so a
+        // save toggles filtering without a full re-tokenize.
+        TokenCache.shared.evict(keeping: Set(papers.map(\.id)))
+        let docs: [SearchDoc] = papers.map { p in
+            SearchDoc(id: p.id, date: p.date, saved: p.saved,
+                      isUpdate: p.isUpdate, isCross: p.isCrosslist,
+                      tokens: TokenCache.shared.tokens(for: p))
+        }
+
         searchTask = Task { @MainActor in
-            // snapshot query + filters on main
-            let q = debouncedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-            let currentScope = scope
-            let saved = savedOnly
-
-            // snapshot lightweight strings on main (SwiftData-safe)
-            let snapshot: [(id: UUID, title: String, authors: String, abstract: String, date: Date, saved: Bool, isUpdate: Bool, isCross: Bool)] =
-                papers.map { p in
-                    (p.id, p.title, p.authors.joined(separator: " "), p.abstract, p.date, p.saved, p.isUpdate, p.isCrosslist)
-                }
-
-            // compute off-main
-            let ids = await computeResultIDs(snapshot: snapshot, q: q, scope: currentScope, savedOnly: saved)
+            let ids = await Self.computeResultIDs(docs: docs, q: q, scope: currentScope, savedOnly: saved)
             if !Task.isCancelled { resultIDs = ids }
         }
     }
 
-    private func computeResultIDs(
-        snapshot: [(id: UUID, title: String, authors: String, abstract: String, date: Date, saved: Bool, isUpdate: Bool, isCross: Bool)],
+    nonisolated private static func computeResultIDs(
+        docs: [SearchDoc],
         q: String,
         scope: Scope,
         savedOnly: Bool
     ) async -> [UUID] {
-        return await Task.detached(priority: .userInitiated) { () -> [UUID] in
-            var base = snapshot
+        await Task.detached(priority: .userInitiated) { () -> [UUID] in
+            var base = docs
 
             if savedOnly { base = base.filter { $0.saved } }
 
@@ -236,22 +291,22 @@ struct SearchView: View {
             case .updates: base = base.filter { $0.isUpdate }
             }
 
-            guard !q.isEmpty, let prepared = SearchScorer.prepare(query: q) else {
+            guard !q.isEmpty, let prepared = TextScorer.prepare(query: q) else {
                 return base.sorted(by: { $0.date > $1.date }).map(\.id)
             }
 
-            let scored: [(id: UUID, score: Double, date: Date)] = base.map { p in
-                let s = SearchScorer.score(
-                    title: p.title,
-                    authors: p.authors,
-                    abstract: p.abstract,
-                    prepared: prepared,
-                    weights: SearchScorer.Weights()
-                )
-                return (p.id, s, p.date)
-            }
-
-            return scored
+            return base
+                .map { doc -> (id: UUID, score: Double, date: Date) in
+                    let s = TextScorer.score(
+                        titleTokens: doc.tokens.title,
+                        authorTokens: doc.tokens.authors,
+                        abstractTokens: doc.tokens.abstract,
+                        haystack: doc.tokens.haystack,
+                        prepared: prepared,
+                        weights: .search
+                    )
+                    return (doc.id, s, doc.date)
+                }
                 .filter { $0.score > 0.0001 }
                 .sorted { a, b in
                     if a.score != b.score { return a.score > b.score }
@@ -271,11 +326,10 @@ struct SearchView: View {
         return VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .top) {
-                    LaTeX(paper.title)
+                    MathText(paper.title)
                         .font(.subheadline)
                         .foregroundColor(KiwiColors.darkBrown)
                         .fixedSize(horizontal: false, vertical: true)
-                        .parsingMode(.onlyEquations)
                         .allowsHitTesting(false)
 
                     Spacer()
@@ -285,9 +339,9 @@ struct SearchView: View {
                 }
 
                 HStack(spacing: 4) {
-                    let allCats = [paper.primaryCategory] + paper.categories.filter { $0 != paper.primaryCategory }
-                    ForEach(Array(allCats.prefix(4).enumerated()), id: \.element) { index, cat in
-                        Text(cat.lowercased())
+                    let allCats = orderedCategories(primary: paper.primaryCategory, all: paper.categories)
+                    ForEach(Array(allCats.prefix(4).enumerated()), id: \.offset) { index, cat in
+                        Text(cat)
                             .font(.caption2)
                             .foregroundColor(KiwiColors.creamWhite)
                             .padding(.horizontal, 6)
@@ -302,18 +356,30 @@ struct SearchView: View {
                     }
                 }
 
-                Text(paper.authors.truncatedAuthors())
+                HStack(alignment: .firstTextBaseline) {
+                    KeywordHighlightedText(
+                        text: paper.authors.truncatedAuthors(),
+                        keywords: queryTerms
+                    )
                     .font(.caption)
-                    .foregroundColor(KiwiColors.darkBrown)
+
+                    Spacer()
+
+                    if paper.saved {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(KiwiColors.darkGreen)
+                            .accessibilityLabel("Saved")
+                    }
+                }
             }
 
             if isExpanded {
                 Divider().background(KiwiColors.darkBrown.opacity(0.25))
 
-                LaTeX(paper.abstract)
+                MathText(paper.abstract)
                     .font(.caption2)
                     .foregroundColor(KiwiColors.creamWhite)
-                    .parsingMode(.onlyEquations)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(10)
                     .background(
@@ -321,6 +387,16 @@ struct SearchView: View {
                             .fill(KiwiColors.darkBrown)
                     )
                     .allowsHitTesting(false)
+
+                ExpandedPaperMeta(
+                    arxivID: Citation.arxivID(from: paper.url),
+                    submittedDate: paper.submittedDate,
+                    listingDate: paper.date,
+                    authors: paper.authors,
+                    comment: paper.comment,
+                    journalRef: paper.journalRef,
+                    doi: paper.doi
+                )
             }
         }
         .padding(.vertical, 6)
@@ -347,7 +423,7 @@ struct SearchView: View {
 
             if !query.isEmpty {
                 Text("“\(query)”")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .font(.system(.caption, design: .rounded, weight: .medium))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.60))
                     .lineLimit(1)
             }
@@ -365,16 +441,34 @@ struct SearchView: View {
         VStack(spacing: 10) {
             Spacer()
             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Search your saved papers")
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                // The view searches the whole downloaded cache, not just saved.
+                Text("Search all downloaded papers")
+                    .font(.system(.title3, design: .rounded, weight: .semibold))
                     .foregroundColor(KiwiColors.darkBrown)
+                Text("Titles, authors, and abstracts.")
+                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                    .foregroundColor(KiwiColors.darkBrown.opacity(0.8))
             } else {
                 Text("No matches")
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .font(.system(.title3, design: .rounded, weight: .semibold))
                     .foregroundColor(KiwiColors.darkBrown)
-                Text("Try fewer words or a different phrase.")
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                Text("Nothing in your downloaded papers matches.")
+                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
                     .foregroundColor(KiwiColors.darkBrown.opacity(0.8))
+                if let url = arxivSearchURL {
+                    Button {
+                        selectedURL = IdentifiableURL(url: url)
+                    } label: {
+                        Label("Search arXiv", systemImage: "magnifyingglass")
+                            .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                            .foregroundColor(KiwiColors.creamWhite)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(KiwiColors.darkGreen))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                }
             }
             Spacer()
         }
@@ -382,90 +476,4 @@ struct SearchView: View {
     }
 }
 
-// MARK: - Scoring (Apple NaturalLanguage lemma tokens + phrase bonus)
-
-private enum SearchScorer {}
-
-nonisolated(unsafe) extension SearchScorer {
-    struct Weights {
-        var title: Double = 6.0
-        var authors: Double = 3.0
-        var abstract: Double = 1.0
-        var phraseBonus: Double = 4.0
-        var multiHitBonus: Double = 0.35
-    }
-
-    struct PreparedQuery {
-        let normalized: String
-        let tokens: Set<String>
-    }
-
-    static func prepare(query: String) -> PreparedQuery? {
-        let q = normalizeText(query)
-        guard !q.isEmpty else { return nil }
-        let tokens = tokenSet(q)
-        guard !tokens.isEmpty else { return nil }
-        return PreparedQuery(normalized: q, tokens: tokens)
-    }
-
-    static func score(title: String, authors: String, abstract: String, prepared: PreparedQuery, weights: Weights) -> Double {
-        let hayAll = normalizeText(title + " " + authors + " " + abstract)
-        var score: Double = 0
-        if prepared.normalized.count >= 3, hayAll.contains(prepared.normalized) {
-            score += weights.phraseBonus
-        }
-
-        let titleTokens = tokenSet(title)
-        let authorTokens = tokenSet(authors)
-        let abstractTokens = tokenSet(abstract)
-
-        let titleHits = titleTokens.intersection(prepared.tokens).count
-        let authorHits = authorTokens.intersection(prepared.tokens).count
-        let abstractHits = abstractTokens.intersection(prepared.tokens).count
-
-        score += Double(titleHits) * weights.title
-        score += Double(authorHits) * weights.authors
-        score += Double(abstractHits) * weights.abstract
-
-        let distinctHits = titleTokens.union(authorTokens).union(abstractTokens).intersection(prepared.tokens).count
-        if distinctHits > 1 {
-            score += Double(distinctHits - 1) * weights.multiHitBonus
-        }
-
-        return score
-    }
-
-    static func score(title: String, authors: String, abstract: String, query: String, weights: Weights) -> Double {
-        guard let prepared = prepare(query: query) else { return 0 }
-        return score(title: title, authors: authors, abstract: abstract, prepared: prepared, weights: weights)
-    }
-
-    private static func normalizeText(_ s: String) -> String {
-        s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func tokenSet(_ text: String) -> Set<String> {
-        let normalized = normalizeText(text)
-        guard !normalized.isEmpty else { return [] }
-
-        let tagger = NLTagger(tagSchemes: [.lemma])
-        tagger.string = normalized
-
-        var out = Set<String>()
-        let range = normalized.startIndex..<normalized.endIndex
-        let options: NLTagger.Options = [.omitWhitespace, .omitPunctuation, .joinNames]
-
-        tagger.enumerateTags(in: range, unit: .word, scheme: .lemma, options: options) { tag, tokenRange in
-            let surface = String(normalized[tokenRange])
-            let lemma = tag?.rawValue ?? surface
-            if lemma.count >= 2, lemma.rangeOfCharacter(from: .decimalDigits) == nil {
-                out.insert(lemma)
-            }
-            return true
-        }
-        return out
-    }
-}
 

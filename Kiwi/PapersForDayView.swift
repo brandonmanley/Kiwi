@@ -105,22 +105,47 @@ extension Array where Element == String {
         if cleaned.count <= maxAuthors {
             return cleaned.joined(separator: ", ")
         }
-        return cleaned.prefix(maxAuthors).joined(separator: ", ") + ", et al"
+        // Append the total so a large collaboration reads as "…, et al. (2,041 authors)".
+        return cleaned.prefix(maxAuthors).joined(separator: ", ")
+            + ", et al. (\(cleaned.count.formatted()) authors)"
     }
 }
 
 struct PapersForDayView: View {
-    let papers: [Paper]
     let day: Date
+
+    // Own the query instead of receiving a `[Paper]` snapshot: a sync that runs
+    // while this view is open deletes rows during pruning, and a captured live
+    // `Paper` reference crashes on first property access once its backing store
+    // row is gone. Re-resolving IDs against a live @Query (as Home does) is safe.
+    @Query private var papers: [Paper]
 
     @State private var selectedURL: IdentifiableURL?
     @State private var shareURL: IdentifiableURL?
     @State private var expandedPaperID: Paper.ID?
     @EnvironmentObject private var settingsStore: SettingsStore
+    @EnvironmentObject private var syncService: PaperSyncService
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @State private var activeFilter: PaperFilter = .new
+
+    private func refresh() async {
+        await syncService.sync(
+            context: modelContext,
+            categories: settingsStore.selectedCategories
+        )
+    }
+
+    init(day: Date) {
+        self.day = day
+        let start = Calendar.current.startOfDay(for: day)
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start
+        _papers = Query(
+            filter: #Predicate<Paper> { $0.date >= start && $0.date < end },
+            sort: [SortDescriptor(\Paper.date, order: .reverse)]
+        )
+    }
 
     // Cached filtered + scored order as IDs, resolved against the current
     // papers on each render — see HomeView for the rationale (cached Paper
@@ -149,12 +174,20 @@ struct PapersForDayView: View {
             base = papers.filter { $0.isUpdate }
         }
 
-        guard let prepared = KeywordScorer.prepare(keywords: settingsStore.keywords) else {
+        guard let prepared = TextScorer.prepare(keywords: settingsStore.keywords) else {
             return base.map(\.id)
         }
 
+        TokenCache.shared.evict(keeping: Set(papers.map(\.id)))
         return base
-            .map { ($0, KeywordScorer.score(paper: $0, prepared: prepared)) }
+            .map { paper -> (Paper, Double) in
+                let t = TokenCache.shared.tokens(for: paper)
+                let score = TextScorer.score(
+                    titleTokens: t.title, authorTokens: t.authors, abstractTokens: t.abstract,
+                    haystack: t.haystack, prepared: prepared, weights: .keyword
+                )
+                return (paper, score)
+            }
             .sorted { lhs, rhs in
                 if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
                 return lhs.0.date > rhs.0.date
@@ -216,7 +249,7 @@ struct PapersForDayView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .onLongPressGesture {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        Haptics.impact(.medium, store: settingsStore)
                         shareURL = IdentifiableURL(url: paper.url)
                     }
                     .onTapGesture {
@@ -227,8 +260,7 @@ struct PapersForDayView: View {
                         Button {
                             paper.saved.toggle()
                             paper.savedDate = paper.saved ? Date() : nil
-                            UINotificationFeedbackGenerator()
-                                .notificationOccurred(paper.saved ? .success : .warning)
+                            Haptics.notification(paper.saved ? .success : .warning, store: settingsStore)
                         } label: {
                             Label(paper.saved ? "Remove" : "Save",
                                   systemImage: paper.saved ? "checkmark" : "plus")
@@ -250,6 +282,20 @@ struct PapersForDayView: View {
                         }
                         .tint(.purple)
                     }
+                    .contextMenu {
+                        paperContextMenuItems(
+                            saved: paper.saved,
+                            onToggleSave: {
+                                paper.saved.toggle()
+                                paper.savedDate = paper.saved ? Date() : nil
+                                Haptics.notification(paper.saved ? .success : .warning, store: settingsStore)
+                            },
+                            onOpenArxiv: { selectedURL = IdentifiableURL(url: paper.url) },
+                            onOpenPDF: { selectedURL = IdentifiableURL(url: paper.url.arxivPDF) },
+                            onShare: { shareURL = IdentifiableURL(url: paper.url) },
+                            onCopyBibTeX: { UIPasteboard.general.string = Citation.bibtex(for: paper) }
+                        )
+                    }
             },
             emptyState: {
                 emptyState
@@ -259,7 +305,8 @@ struct PapersForDayView: View {
                     .padding(.horizontal, 14)
                     .padding(.bottom, 10)
                     .safeAreaPadding(.bottom)
-            }
+            },
+            onRefresh: { await refresh() }
         )
         .onAppear { displayedIDs = computeDisplayedIDs() }
         .onChange(of: activeFilter) { _, _ in displayedIDs = computeDisplayedIDs() }
@@ -329,11 +376,10 @@ struct PapersForDayView: View {
         return VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .top) {
-                    LaTeX(paper.title)
+                    MathText(paper.title)
                         .font(.subheadline)
                         .foregroundColor(KiwiColors.darkBrown)
                         .fixedSize(horizontal: false, vertical: true)
-                        .parsingMode(.onlyEquations)
                         .allowsHitTesting(false)
 
                     Spacer()
@@ -343,9 +389,9 @@ struct PapersForDayView: View {
                 }
 
                 HStack(spacing: 4) {
-                    let allCats = [paper.primaryCategory] + paper.categories.filter { $0 != paper.primaryCategory }
-                    ForEach(Array(allCats.enumerated()), id: \.element) { index, cat in
-                        Text(cat.lowercased())
+                    let allCats = orderedCategories(primary: paper.primaryCategory, all: paper.categories)
+                    ForEach(Array(allCats.enumerated()), id: \.offset) { index, cat in
+                        Text(cat)
                             .font(.caption2)
                             .foregroundColor(KiwiColors.creamWhite)
                             .padding(.horizontal, 6)
@@ -376,10 +422,9 @@ struct PapersForDayView: View {
             if isExpanded {
                 Divider().background(KiwiColors.darkBrown.opacity(0.25))
 
-                LaTeX(paper.abstract)
+                MathText(paper.abstract)
                     .font(.caption2)
                     .foregroundColor(KiwiColors.creamWhite)
-                    .parsingMode(.onlyEquations)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(10)
                     .background(
@@ -387,6 +432,16 @@ struct PapersForDayView: View {
                             .fill(KiwiColors.darkBrown)
                     )
                     .allowsHitTesting(false)
+
+                ExpandedPaperMeta(
+                    arxivID: Citation.arxivID(from: paper.url),
+                    submittedDate: paper.submittedDate,
+                    listingDate: paper.date,
+                    authors: paper.authors,
+                    comment: paper.comment,
+                    journalRef: paper.journalRef,
+                    doi: paper.doi
+                )
             }
         }
         .padding(.vertical, 6)
@@ -403,11 +458,11 @@ struct PapersForDayView: View {
         VStack(spacing: 10) {
             Spacer()
             Text("No papers for this day")
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .font(.system(.title3, design: .rounded, weight: .semibold))
                 .foregroundColor(KiwiColors.darkBrown)
 
             Text("Try a different day from the calendar.")
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .font(.system(.subheadline, design: .rounded, weight: .semibold))
                 .foregroundColor(KiwiColors.darkBrown.opacity(0.8))
 
             Spacer()

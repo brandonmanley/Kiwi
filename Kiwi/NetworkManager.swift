@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import UserNotifications
 
 // MARK: - arXiv dedup key
 
@@ -17,15 +18,22 @@ func arxivDedupKey(for url: URL) -> String {
 
 // MARK: - Rate limiter
 
-// arXiv's API guidelines ask for roughly one request every few seconds and
-// discourage bursts. This actor serializes request *starts* so concurrent
-// category fetches don't fire a batch at once.
-private actor ArxivRateLimiter {
+// arXiv's Terms of Use for the legacy APIs ask for no more than one request
+// every three seconds *and* a single connection at a time. This actor
+// serializes request *starts* so nothing — including a retry storm — can push
+// the app back over the three-second interval. (The single-connection clause is
+// enforced separately via httpMaximumConnectionsPerHost on the shared session.)
+actor ArxivRateLimiter {
     static let shared = ArxivRateLimiter()
 
-    private let minInterval: TimeInterval = 1.0
+    private let minInterval: TimeInterval
     private var nextEarliestStart: Date = .distantPast
 
+    init(minInterval: TimeInterval = 3.0) {
+        self.minInterval = minInterval
+    }
+
+    // Reserve the next start slot, honoring the minimum interval between starts.
     func waitForSlot() async {
         let now = Date()
         let start = max(now, nextEarliestStart)
@@ -34,6 +42,63 @@ private actor ArxivRateLimiter {
         if delay > 0 {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
+    }
+
+    // Sleep for a retry backoff *through* the limiter's own clock: the backoff
+    // reserves the interval too, so retries can't be used to burst past the
+    // three-second policy. Used instead of a bare Task.sleep for all backoffs.
+    func backoff(_ seconds: TimeInterval) async {
+        let now = Date()
+        let resume = max(now, nextEarliestStart).addingTimeInterval(seconds)
+        nextEarliestStart = resume.addingTimeInterval(minInterval)
+        let delay = resume.timeIntervalSince(now)
+        if delay > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+    }
+}
+
+// MARK: - SyncFailure
+
+// A real error taxonomy so the UI can tell the user what actually went wrong.
+// The reported "check your connection" symptom came from collapsing every
+// failure — including arXiv 429/503 throttling — into a single Bool.
+enum SyncFailure: Error, Equatable, Sendable {
+    case offline
+    case throttled(retryAfter: TimeInterval?)
+    case serverError(status: Int)
+    case timedOut
+    case parseFailed
+}
+
+// MARK: - Announce type (RSS listing feeds)
+
+// arXiv's RSS listing items carry an authoritative `Announce Type` — this is
+// arXiv's own classification, not our derived `!tracked.contains(primary)`
+// heuristic, so it doesn't reclassify already-saved papers when the user edits
+// their category set. `replace-cross` is both a replacement and a cross-list.
+enum ArxivAnnounceType: String, Sendable {
+    case new
+    case cross
+    case replace
+    case replaceCross = "replace-cross"
+
+    var isUpdate: Bool { self == .replace || self == .replaceCross }
+    var isCrosslist: Bool { self == .cross || self == .replaceCross }
+
+    // Prefers the <arxiv:announce_type> element, falling back to the
+    // "Announce Type: <type>" prefix arXiv also embeds in <description>.
+    init?(element: String, description: String) {
+        let candidate = element.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let t = ArxivAnnounceType(rawValue: candidate) { self = t; return }
+        if let r = description.range(of: "Announce Type:") {
+            let word = description[r.upperBound...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix { !$0.isWhitespace }
+                .lowercased()
+            if let t = ArxivAnnounceType(rawValue: String(word)) { self = t; return }
+        }
+        return nil
     }
 }
 
@@ -48,6 +113,19 @@ struct ParsedPaper: Sendable {
     var updatedDate: Date?
     var categories: Set<String> = []
     var primaryCategory: String?
+    // Bibliographic extras (arxiv:comment / arxiv:journal_ref / arxiv:doi).
+    var comment: String?
+    var journalRef: String?
+    var doi: String?
+
+    // RSS-only. When set, arXiv has told us the listing day and the paper's
+    // new/cross/replace classification directly, so storage sync uses these
+    // instead of the announcementDate heuristic and the tracked-category
+    // derivation. `listingDate` is already bucketed to local midnight of the
+    // ET listing day. nil on the Atom path.
+    var listingDate: Date?
+    var rssIsUpdate: Bool?
+    var rssIsCrosslist: Bool?
 }
 
 // MARK: - PaperBuilder (mutable reference type used during XML parsing)
@@ -62,6 +140,9 @@ private final class PaperBuilder {
     var updatedDate: Date?
     var categories: Set<String> = []
     var primaryCategory: String?
+    var comment: String = ""
+    var journalRef: String = ""
+    var doi: String = ""
 }
 
 // MARK: - ArxivPageParser (self-contained per HTTP response — no shared state)
@@ -89,6 +170,10 @@ final class ArxivPageParser: NSObject, XMLParserDelegate {
         var result: [String: ParsedPaper] = [:]
         for (key, b) in builders {
             guard let url = b.url else { continue }
+            func nonEmpty(_ s: String) -> String? {
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                return t.isEmpty ? nil : t
+            }
             result[key] = ParsedPaper(
                 title: b.title.trimmingCharacters(in: .whitespacesAndNewlines),
                 authors: b.authors,
@@ -97,7 +182,10 @@ final class ArxivPageParser: NSObject, XMLParserDelegate {
                 submittedDate: b.submittedDate,
                 updatedDate: b.updatedDate,
                 categories: b.categories,
-                primaryCategory: b.primaryCategory
+                primaryCategory: b.primaryCategory,
+                comment: nonEmpty(b.comment),
+                journalRef: nonEmpty(b.journalRef),
+                doi: nonEmpty(b.doi)
             )
         }
         return result
@@ -149,6 +237,12 @@ final class ArxivPageParser: NSObject, XMLParserDelegate {
         case "updated":
             let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { builder.updatedDate = Self.isoFormatter.date(from: trimmed) }
+        case "arxiv:comment", "comment":
+            builder.comment += string
+        case "arxiv:journal_ref", "journal_ref":
+            builder.journalRef += string
+        case "arxiv:doi", "doi":
+            builder.doi += string
         default:
             break
         }
@@ -192,6 +286,9 @@ final class ArxivPageParser: NSObject, XMLParserDelegate {
                 } else if existing.submittedDate == nil {
                     existing.submittedDate = builder.submittedDate
                 }
+                if existing.comment.isEmpty { existing.comment = builder.comment }
+                if existing.journalRef.isEmpty { existing.journalRef = builder.journalRef }
+                if existing.doi.isEmpty { existing.doi = builder.doi }
             } else {
                 builders[key] = builder
             }
@@ -204,170 +301,511 @@ final class ArxivPageParser: NSObject, XMLParserDelegate {
     }
 }
 
-// MARK: - ArxivFetcher (concurrent fetching, runs off main actor)
+// MARK: - ArxivRSSParser (rss.arxiv.org listing feeds — one announcement day)
 
-private enum ArxivFetcher {
+// Parses a single category's RSS listing (https://rss.arxiv.org/rss/<category>).
+// Unlike the Atom API this feed states the listing day (channel/item pubDate)
+// and each paper's new/cross/replace classification directly, which is why it's
+// the primary sync path. Identity converges with ArxivPageParser: the guid
+// carries the versioned id, from which we rebuild `http://arxiv.org/abs/<id>`
+// so arxivDedupKey lands on the same row as an Atom-fetched paper.
+// Internal (not private) so unit tests can feed it saved fixtures.
+final class ArxivRSSParser: NSObject, XMLParserDelegate {
 
-    struct FetchResult {
-        var papers: [String: ParsedPaper]
-        // True if at least one category produced a successful HTTP response.
-        // Lets callers distinguish "arXiv had nothing new" from "network completely failed".
-        var anySucceeded: Bool
+    private final class ItemBuilder {
+        var title = ""
+        var link = ""
+        var guid = ""
+        var descriptionText = ""
+        var creator = ""
+        var announceType = ""
+        var doi = ""
+        var journalRef = ""
+        var pubDate: Date?
+        var categories: [String] = []
+
+        // Prefer the versioned id from the guid ("oai:arXiv.org:2501.12345v2"),
+        // falling back to the (version-stripped) link's last path component.
+        // Always rebuilt as an http abs URL so the dedup key matches the Atom path.
+        func resolvedURL() -> URL? {
+            var id = ""
+            if let last = guid.components(separatedBy: ":").last,
+               !last.trimmingCharacters(in: .whitespaces).isEmpty {
+                id = last.trimmingCharacters(in: .whitespaces)
+            } else if let u = URL(string: link) {
+                id = u.lastPathComponent
+            }
+            guard !id.isEmpty else { return nil }
+            return URL(string: "http://arxiv.org/abs/\(id)")
+        }
     }
 
-    // Shared session carrying the descriptive User-Agent arXiv's API guidelines ask for.
-    private static let session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.httpAdditionalHeaders = [
-            "User-Agent": "Kiwi/1.0 (mailto:brandonmanley10@gmail.com)"
-        ]
-        return URLSession(configuration: config)
+    private var currentElement = ""
+    private var buffer = ""
+    private var inItem = false
+    private var builder: ItemBuilder?
+    private var items: [ItemBuilder] = []
+    private var channelPubDate: Date?
+
+    // arXiv RSS pubDates are RFC-822 with a fixed ET offset ("Fri, 23 Aug 2024
+    // 00:00:00 -0400"). The Z in the string carries the offset; the formatter's
+    // timeZone is irrelevant for parsing.
+    private static let rfc822: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss Z"
+        return f
     }()
 
-    private struct HTTPStatusError: Error {
-        let statusCode: Int
-        let retryAfter: TimeInterval?
+    private static let etZone = TimeZone(identifier: "America/New_York")!
+
+    // The listing day is defined by arXiv in ET, but views bucket by the user's
+    // local calendar — materialize the ET year/month/day as local midnight so the
+    // paper lands under the correct day in any timezone (mirrors
+    // NetworkManager.announcementDate's final step).
+    private static func listingDay(from pubDate: Date) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = etZone
+        let comps = cal.dateComponents([.year, .month, .day], from: pubDate)
+        return Calendar.current.date(from: comps) ?? Calendar.current.startOfDay(for: pubDate)
     }
 
-    // Performs a request through the shared rate limiter and turns non-2xx
-    // responses into thrown errors, so a 429/503 with an HTML error body can't
-    // masquerade as a successful (but empty) parse. Retries once on a
-    // throttling status that carries a Retry-After header.
-    private static func fetchData(_ request: URLRequest) async throws -> Data {
+    func parse(_ data: Data) -> [String: ParsedPaper] {
+        let xmlParser = XMLParser(data: data)
+        xmlParser.delegate = self
+        xmlParser.parse()
+
+        var result: [String: ParsedPaper] = [:]
+        for b in items {
+            guard let url = b.resolvedURL() else { continue }
+            let key = arxivDedupKey(for: url)
+
+            let type = ArxivAnnounceType(element: b.announceType, description: b.descriptionText)
+            let listing = (b.pubDate ?? channelPubDate).map { Self.listingDay(from: $0) }
+
+            var pp = ParsedPaper()
+            pp.title = Self.collapse(b.title)
+            pp.authors = Self.authors(from: b.creator)
+            pp.abstract = Self.abstract(from: b.descriptionText)
+            pp.url = url
+            pp.categories = Set(b.categories)
+            // The first <category> in an RSS item is the paper's primary class.
+            pp.primaryCategory = b.categories.first
+            pp.journalRef = b.journalRef.isEmpty ? nil : b.journalRef
+            pp.doi = b.doi.isEmpty ? nil : b.doi
+            pp.listingDate = listing
+            pp.rssIsUpdate = type?.isUpdate
+            pp.rssIsCrosslist = type?.isCrosslist
+
+            result[key] = pp
+        }
+        return result
+    }
+
+    // MARK: XMLParserDelegate
+
+    func parser(_ parser: XMLParser,
+                didStartElement elementName: String,
+                namespaceURI: String?,
+                qualifiedName qName: String?,
+                attributes attributeDict: [String : String] = [:]) {
+        currentElement = elementName
+        if elementName == "item" {
+            builder = ItemBuilder()
+            inItem = true
+            return
+        }
+        buffer = ""
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        buffer += string
+    }
+
+    func parser(_ parser: XMLParser,
+                didEndElement elementName: String,
+                namespaceURI: String?,
+                qualifiedName qName: String?) {
+
+        let text = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if elementName == "item" {
+            if let b = builder { items.append(b) }
+            builder = nil
+            inItem = false
+            return
+        }
+
+        guard inItem, let b = builder else {
+            // Channel-level pubDate is the fallback listing day for items lacking one.
+            if elementName == "pubDate", channelPubDate == nil {
+                channelPubDate = Self.rfc822.date(from: text)
+            }
+            return
+        }
+
+        switch elementName {
+        case "title":                    b.title = text
+        case "link":                     b.link = text
+        case "guid":                     b.guid = text
+        case "description":              b.descriptionText = text
+        case "dc:creator":               b.creator = text
+        case "arxiv:announce_type":      b.announceType = text
+        case "arxiv:DOI":                b.doi = text
+        case "arxiv:journal_reference":  b.journalRef = text
+        case "pubDate":                  b.pubDate = Self.rfc822.date(from: text)
+        case "category":                 if !text.isEmpty { b.categories.append(text) }
+        default:                         break
+        }
+    }
+
+    // MARK: Field extraction
+
+    // <description> is "arXiv:ID Announce Type: <type> \nAbstract: <text>".
+    private static func abstract(from description: String) -> String {
+        if let r = description.range(of: "Abstract:") {
+            return String(description[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return description.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // <dc:creator> is a comma-joined list of full names ("Alice Smith, Bob Jones").
+    private static func authors(from creator: String) -> [String] {
+        creator
+            .components(separatedBy: ",")
+            .map { collapse($0) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func collapse(_ s: String) -> String {
+        s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+         .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - ArxivFetcher (sequential fetching, runs off main actor)
+
+// Internal (not private) so the fetch layer is unit-testable via a URLProtocol
+// stub and an injectable rate limiter — see ArxivFetcherTests.
+enum ArxivFetcher {
+
+    // Per-category outcomes rather than a single anySucceeded Bool: nineteen of
+    // twenty categories can fail while one succeeds, and the toast must be able
+    // to say "Synced N of M" and to name the dominant failure honestly.
+    struct FetchResult {
+        var categoryResults: [String: Result<[String: ParsedPaper], SyncFailure>]
+
+        // All successfully-parsed papers, merged across categories.
+        var mergedPapers: [String: ParsedPaper] {
+            var merged: [String: ParsedPaper] = [:]
+            for case let .success(papers) in categoryResults.values {
+                ArxivFetcher.mergePapers(papers, into: &merged)
+            }
+            return merged
+        }
+
+        var succeededCategories: Set<String> {
+            Set(categoryResults.compactMap { key, value in
+                if case .success = value { return key } else { return nil }
+            })
+        }
+
+        // When every category failed, the single failure to surface. Throttling
+        // dominates (it's the actionable "wait a moment"), then offline, then
+        // the not-responding bucket.
+        var dominantFailure: SyncFailure? {
+            let failures = categoryResults.values.compactMap { value -> SyncFailure? in
+                if case .failure(let f) = value { return f } else { return nil }
+            }
+            guard !failures.isEmpty else { return nil }
+            if let t = failures.first(where: { if case .throttled = $0 { return true } else { return false } }) { return t }
+            if failures.contains(.offline) { return .offline }
+            if failures.contains(.timedOut) { return .timedOut }
+            if let s = failures.first(where: { if case .serverError = $0 { return true } else { return false } }) { return s }
+            return failures.first
+        }
+    }
+
+    // Injectable so tests can point the fetch layer at a URLProtocol stub, and
+    // so retries stay fast under test. Production keeps the three-second limiter
+    // and a two-second backoff base.
+    static var session: URLSession = makeSession()
+    static var rateLimiter: ArxivRateLimiter = .shared
+    static var retryBaseDelay: TimeInterval = 2.0
+
+    // Shared session: descriptive User-Agent per arXiv's guidelines, a single
+    // connection per host (the ToU's single-connection clause), and a modest
+    // protocol cache — arXiv listings change once daily, so cached GETs are
+    // both correct and far less likely to be throttled by Fastly.
+    static func makeSession(protocolClasses: [AnyClass]? = nil) -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.httpAdditionalHeaders = [
+            "User-Agent": "Kiwi/1.0 (mailto:\(contactAddress))"
+        ]
+        config.httpMaximumConnectionsPerHost = 1
+        config.requestCachePolicy = .useProtocolCachePolicy
+        config.urlCache = URLCache(memoryCapacity: 4 * 1024 * 1024,
+                                   diskCapacity: 32 * 1024 * 1024)
+        if let protocolClasses { config.protocolClasses = protocolClasses }
+        return URLSession(configuration: config)
+    }
+
+    // Contact address arXiv asks API clients to advertise. Pulled from the
+    // bundle's "ArxivContactEmail" Info.plist key when present so it can be a
+    // build setting, falling back to the maintainer address.
+    private static let contactAddress: String =
+        (Bundle.main.object(forInfoDictionaryKey: "ArxivContactEmail") as? String)
+            ?? "brandonmanley10@gmail.com"
+
+    // The set of statuses worth retrying: throttling and transient upstream
+    // errors. A bare 404/400 is a client bug and fails immediately.
+    private static let retryableStatuses: Set<Int> = [429, 500, 502, 503, 504]
+
+    // Performs a request through the rate limiter and maps every failure into
+    // the SyncFailure taxonomy. Retries up to three attempts total with
+    // exponential backoff and full jitter (base two seconds), preferring a
+    // Retry-After header when present, capped at thirty seconds. All backoff
+    // sleeps go through the limiter's clock so a retry can't burst past the
+    // policy. notConnectedToInternet fails fast — that one is genuinely offline.
+    static func fetchData(_ request: URLRequest, maxAttempts: Int = 3) async throws -> Data {
         var attempt = 0
         while true {
-            await ArxivRateLimiter.shared.waitForSlot()
-            let (data, response) = try await session.data(for: request)
+            attempt += 1
+            await rateLimiter.waitForSlot()
 
-            guard let http = response as? HTTPURLResponse else { return data }
-            if (200...299).contains(http.statusCode) { return data }
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else { return data }
+                if (200...299).contains(http.statusCode) { return data }
 
-            let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
-            let isThrottled = (http.statusCode == 429 || http.statusCode == 503)
-            if isThrottled, let retryAfter, attempt == 0 {
-                attempt += 1
-                try await Task.sleep(nanoseconds: UInt64(min(retryAfter, 30) * 1_000_000_000))
-                continue
+                let retryAfter = http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
+                let status = http.statusCode
+
+                if retryableStatuses.contains(status), attempt < maxAttempts {
+                    await backoff(attempt: attempt, retryAfter: retryAfter)
+                    continue
+                }
+                if status == 429 || status == 503 {
+                    throw SyncFailure.throttled(retryAfter: retryAfter)
+                }
+                throw SyncFailure.serverError(status: status)
+
+            } catch let failure as SyncFailure {
+                throw failure
+            } catch let urlError as URLError {
+                switch urlError.code {
+                case .notConnectedToInternet, .dataNotAllowed:
+                    // Fail fast: the device says it isn't online.
+                    throw SyncFailure.offline
+                case .networkConnectionLost:
+                    if attempt < maxAttempts { await backoff(attempt: attempt, retryAfter: nil); continue }
+                    throw SyncFailure.offline
+                case .timedOut, .cannotConnectToHost:
+                    if attempt < maxAttempts { await backoff(attempt: attempt, retryAfter: nil); continue }
+                    throw SyncFailure.timedOut
+                default:
+                    throw SyncFailure.serverError(status: urlError.errorCode)
+                }
             }
-            throw HTTPStatusError(statusCode: http.statusCode, retryAfter: retryAfter)
         }
+    }
+
+    private static func backoff(attempt: Int, retryAfter: TimeInterval?) async {
+        let seconds: TimeInterval
+        if let retryAfter {
+            seconds = min(retryAfter, 30)
+        } else {
+            let ceiling = retryBaseDelay * pow(2.0, Double(attempt - 1))
+            seconds = Double.random(in: 0...ceiling) // full jitter
+        }
+        await rateLimiter.backoff(seconds)
     }
 
     static func fetchAll(
         categories: [String],
-        maxPerCategory: Int = 500,
-        lookbackDays: Int = 10
+        maxPerCategory: Int = 200,
+        lookbackDays: Int = 10,
+        onProgress: (@Sendable (_ done: Int, _ total: Int) -> Void)? = nil
     ) async -> FetchResult {
-        let maxConcurrent = 4
-        var merged: [String: ParsedPaper] = [:]
-        var anySucceeded = false
+        var results: [String: Result<[String: ParsedPaper], SyncFailure>] = [:]
+        let total = categories.count
+        var done = 0
 
-        for batchStart in stride(from: 0, to: categories.count, by: maxConcurrent) {
-            let batchEnd = min(batchStart + maxConcurrent, categories.count)
-            let batch = Array(categories[batchStart..<batchEnd])
-
-            await withTaskGroup(of: (papers: [String: ParsedPaper], succeeded: Bool).self) { group in
-                for category in batch {
-                    group.addTask {
-                        await fetchCategory(category, maxResults: maxPerCategory, lookbackDays: lookbackDays)
-                    }
-                }
-                for await result in group {
-                    mergePapers(result.papers, into: &merged)
-                    if result.succeeded { anySucceeded = true }
-                }
+        // Sequential: the global limiter already serialized request *starts*, so
+        // the old concurrent task group bought no throughput while breaking the
+        // single-connection clause. One category at a time is simpler and, with
+        // last-updated sorting and early termination, faster in practice.
+        //
+        // RSS is the primary path: one request returns the whole announcement day
+        // with arXiv's own new/cross/replace classification. Only a *failed* feed
+        // falls back to the Atom query (an empty feed is a real weekend/holiday,
+        // not a failure), so one bad response can't blank the day.
+        for category in categories {
+            if Task.isCancelled { break }
+            switch await fetchCategoryRSS(category) {
+            case .success(let papers):
+                results[category] = .success(papers)
+            case .failure:
+                results[category] = await fetchCategory(category, maxResults: maxPerCategory, lookbackDays: lookbackDays)
             }
+            done += 1
+            onProgress?(done, total)
         }
 
-        return FetchResult(papers: merged, anySucceeded: anySucceeded)
+        return FetchResult(categoryResults: results)
+    }
+
+    // Fetches and parses one category's RSS listing feed. A network/HTTP failure
+    // surfaces as .failure so the caller can fall back to the Atom query; an
+    // empty-but-valid feed returns .success([:]).
+    private static func fetchCategoryRSS(
+        _ category: String
+    ) async -> Result<[String: ParsedPaper], SyncFailure> {
+        guard let url = URL(string: "https://rss.arxiv.org/rss/\(category)") else {
+            return .failure(.parseFailed)
+        }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .useProtocolCachePolicy
+        request.timeoutInterval = 20
+        do {
+            let data = try await fetchData(request)
+            return .success(ArxivRSSParser().parse(data))
+        } catch let failure as SyncFailure {
+            return .failure(failure)
+        } catch {
+            return .failure(.serverError(status: -1))
+        }
     }
 
     private static func fetchCategory(
         _ category: String,
         maxResults: Int,
         lookbackDays: Int
-    ) async -> (papers: [String: ParsedPaper], succeeded: Bool) {
+    ) async -> Result<[String: ParsedPaper], SyncFailure> {
         let batchSize = 100
         var start = 0
         let cutoff = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: Date()) ?? Date()
         var accumulated: [String: ParsedPaper] = [:]
-        var succeeded = false
+        var sawSuccess = false
 
         while start < maxResults {
             guard !Task.isCancelled else { break }
 
             let batchLimit = min(batchSize, maxResults - start)
-            let query = "https://export.arxiv.org/api/query?search_query=cat:\(category)&start=\(start)&max_results=\(batchLimit)&sortBy=submittedDate&sortOrder=descending"
-            guard let url = URL(string: query) else { break }
+            var components = URLComponents(string: "https://export.arxiv.org/api/query")!
+            components.queryItems = [
+                URLQueryItem(name: "search_query", value: "cat:\(category)"),
+                URLQueryItem(name: "start", value: "\(start)"),
+                URLQueryItem(name: "max_results", value: "\(batchLimit)"),
+                // Sort by *last updated*, not original submission: a replacement
+                // announced tonight then sits on page one instead of hundreds of
+                // entries deep, which is exactly what the app wants.
+                URLQueryItem(name: "sortBy", value: "lastUpdatedDate"),
+                URLQueryItem(name: "sortOrder", value: "descending"),
+            ]
+            guard let url = components.url else { break }
 
             var request = URLRequest(url: url)
-            request.cachePolicy = .reloadIgnoringLocalCacheData
-            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-            request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+            request.cachePolicy = .useProtocolCachePolicy
             request.timeoutInterval = 20
 
             do {
                 let data = try await fetchData(request)
-                succeeded = true
-                let urlsBefore = Set(accumulated.keys)
+                sawSuccess = true
 
                 let pagePapers = ArxivPageParser().parse(data)
+                if pagePapers.isEmpty { break }
                 mergePapers(pagePapers, into: &accumulated)
 
-                let newDates = accumulated
-                    .filter { !urlsBefore.contains($0.key) }
-                    .values
-                    .compactMap(\.updatedDate)
-
-                if newDates.isEmpty { break }
-                if let oldest = newDates.min(), oldest < cutoff { break }
+                // With lastUpdatedDate ordering the page is genuinely sorted by
+                // the quantity being compared, so the moment the *oldest* entry
+                // on this page predates the cutoff we've seen everything in range
+                // — normally after a single request.
+                if let oldest = pagePapers.values.compactMap(\.updatedDate).min(), oldest < cutoff { break }
+                // Fewer results than requested means the last page.
+                if pagePapers.count < batchLimit { break }
+            } catch let failure as SyncFailure {
+                // Pages already fetched are still useful; only report failure if
+                // the very first request failed.
+                return sawSuccess ? .success(accumulated) : .failure(failure)
             } catch {
-                #if DEBUG
-                print("⚠️ Failed to fetch \(category) batch at start=\(start): \(error)")
-                #endif
-                break
+                return sawSuccess ? .success(accumulated) : .failure(.serverError(status: -1))
             }
 
             start += batchSize
         }
 
-        return (accumulated, succeeded)
+        return .success(accumulated)
     }
 
-    // Queries by *last name only* on purpose. arXiv stores authors as
-    // "Lastname, Firstname", so a quoted full-name search misses common
-    // first-name variants ("Ed Witten" vs "Edward Witten"). We cast a wide
-    // net here and let the caller filter on the client side.
-    static func fetchByAuthor(lastName: String, maxResults: Int = 100) async -> [String: ParsedPaper] {
-        let trimmed = lastName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [:] }
+    // Two-stage author fetch. Stage one issues a quoted phrase query covering
+    // both name orderings ("Brandon Manley" OR "Manley, Brandon"), which is
+    // precise for common surnames where a bare `au:manley` never surfaces the
+    // right person. Stage two only runs if stage one is thin: a surname query
+    // (quoted when the surname has a space, which particled names now do), sorted
+    // by last-updated and paged up to a cap. Throws rather than swallowing
+    // errors so the view can tell "no papers" from "the request failed".
+    static func fetchByAuthor(_ name: AuthorName, targetMatches: Int = 40) async throws -> [String: ParsedPaper] {
+        var merged: [String: ParsedPaper] = [:]
 
+        // Stage 1 — quoted phrase, both orderings.
+        let phraseQuery = name.queryPhrases().map { "au:\"\($0)\"" }.joined(separator: " OR ")
+        let stage1 = try await runAuthorQuery(searchQuery: phraseQuery, start: 0, sortBy: "submittedDate")
+        mergePapers(stage1, into: &merged)
+
+        func filteredCount() -> Int {
+            merged.values.filter { paperMatches($0, name) }.count
+        }
+
+        // Stage 2 — surname fallback, only while under target.
+        if filteredCount() < targetMatches {
+            let surname = name.lastName
+            let quoted = surname.contains(" ") ? "\"\(surname)\"" : surname
+            var start = 0
+            var page = 0
+            while filteredCount() < targetMatches && page < 4 {
+                let batch = try await runAuthorQuery(searchQuery: "au:\(quoted)", start: start, sortBy: "lastUpdatedDate")
+                if batch.isEmpty { break }
+                let before = merged.count
+                mergePapers(batch, into: &merged)
+                start += 100
+                page += 1
+                // No new keys means we've exhausted the useful pages.
+                if merged.count == before { break }
+            }
+        }
+
+        return merged
+    }
+
+    private static func paperMatches(_ parsed: ParsedPaper, _ target: AuthorName) -> Bool {
+        parsed.authors.contains { AuthorName.parse($0).map { target.matches($0) } ?? false }
+    }
+
+    private static func runAuthorQuery(searchQuery: String, start: Int, sortBy: String) async throws -> [String: ParsedPaper] {
         var components = URLComponents(string: "https://export.arxiv.org/api/query")!
         components.queryItems = [
-            URLQueryItem(name: "search_query", value: "au:\(trimmed)"),
-            URLQueryItem(name: "start", value: "0"),
-            URLQueryItem(name: "max_results", value: "\(maxResults)"),
-            URLQueryItem(name: "sortBy", value: "submittedDate"),
+            URLQueryItem(name: "search_query", value: searchQuery),
+            URLQueryItem(name: "start", value: "\(start)"),
+            URLQueryItem(name: "max_results", value: "100"),
+            URLQueryItem(name: "sortBy", value: sortBy),
             URLQueryItem(name: "sortOrder", value: "descending"),
         ]
-
-        guard let url = components.url else { return [:] }
+        guard let url = components.url else { throw SyncFailure.parseFailed }
 
         var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-        // Bounded timeout so the UI can't hang for the URLSession default (60s).
-        request.timeoutInterval = 15
+        request.cachePolicy = .useProtocolCachePolicy
+        request.timeoutInterval = 20
+        let data = try await fetchData(request)
+        return ArxivPageParser().parse(data)
+    }
 
-        do {
-            let data = try await fetchData(request)
-            return ArxivPageParser().parse(data)
-        } catch {
-            #if DEBUG
-            print("⚠️ Failed to fetch papers for last name \(trimmed): \(error)")
-            #endif
-            return [:]
+    // Combines two optional flags: applies `op` when both are present, otherwise
+    // keeps whichever is non-nil.
+    private static func combineOptionalBool(_ a: Bool?, _ b: Bool?, with op: (Bool, Bool) -> Bool) -> Bool? {
+        switch (a, b) {
+        case let (x?, y?): return op(x, y)
+        default:           return a ?? b
         }
     }
 
@@ -388,6 +826,19 @@ private enum ArxivFetcher {
                 } else if existing.submittedDate == nil {
                     existing.submittedDate = paper.submittedDate
                 }
+                if existing.comment == nil { existing.comment = paper.comment }
+                if existing.journalRef == nil { existing.journalRef = paper.journalRef }
+                if existing.doi == nil { existing.doi = paper.doi }
+
+                // RSS classification is per-feed: the same paper appears as "new"
+                // in its primary feed and "cross" in a feed it's cross-listed into.
+                // A replacement in *any* feed makes it an update (OR); a native
+                // sighting (non-cross) in *any* tracked feed makes it not a
+                // cross-list (AND). listingDate is identical across feeds — keep
+                // whichever we have.
+                existing.rssIsUpdate = combineOptionalBool(existing.rssIsUpdate, paper.rssIsUpdate, with: { $0 || $1 })
+                existing.rssIsCrosslist = combineOptionalBool(existing.rssIsCrosslist, paper.rssIsCrosslist, with: { $0 && $1 })
+                if existing.listingDate == nil { existing.listingDate = paper.listingDate }
                 target[key] = existing
             } else {
                 target[key] = paper
@@ -409,76 +860,66 @@ final class NetworkManager {
 
     // MARK: - Public API
 
-    func fetchPapersByAuthor(name: String, maxResults: Int = 100) async -> [Paper] {
+    // Returns author-search results as value-type cards. Nothing is inserted
+    // into SwiftData here — author results used to be persisted, which surfaced
+    // them on Home and let the next sync's prune delete them (the reported
+    // "results shrink on revisit" bug). Cards backed by an already-stored row
+    // carry its saved state and persistent id; the rest are fetch-only until the
+    // user explicitly saves them. Throws so the view can distinguish failure
+    // from an empty result.
+    func fetchPapersByAuthor(name: String, maxResults: Int = 100) async throws -> [PaperCard] {
         guard let target = AuthorName.parse(name) else { return [] }
 
-        let fetched = await ArxivFetcher.fetchByAuthor(lastName: target.lastName, maxResults: maxResults)
+        let fetched = try await ArxivFetcher.fetchByAuthor(target)
 
-        // Filter by AuthorName matching so "Ed Witten" and "Edward Witten" map
-        // to the same set of papers.
-        let matching = fetched.values.filter { parsed in
-            parsed.authors.contains { authorString in
-                guard let parsedAuthor = AuthorName.parse(authorString) else { return false }
-                return target.matches(parsedAuthor)
-            }
+        // Deduplicate on arxivDedupKey (not url) so a stored v1 and a fetched v2
+        // collapse. Stored rows win the key so their saved state is preserved.
+        var byKey: [String: PaperCard] = [:]
+
+        let stored = (try? modelContext.fetch(FetchDescriptor<Paper>())) ?? []
+        for paper in stored where paper.authors.contains(where: { AuthorName.parse($0).map { target.matches($0) } ?? false }) {
+            byKey[arxivDedupKey(for: paper.url)] = PaperCard(paper)
         }
 
-        var result: [Paper] = []
-
-        do {
-            let stored = try modelContext.fetch(FetchDescriptor<Paper>())
-            let storedByKey = Dictionary(stored.map { (arxivDedupKey(for: $0.url), $0) },
-                                         uniquingKeysWith: { first, _ in first })
-
-            for parsed in matching {
-                guard let url = parsed.url else { continue }
-
-                if let existing = storedByKey[arxivDedupKey(for: url)] {
-                    result.append(existing)
-                } else {
-                    let paper = Paper(
-                        title: parsed.title,
-                        authors: parsed.authors,
-                        abstract: parsed.abstract,
-                        url: url,
-                        categories: Array(parsed.categories),
-                        primaryCategory: parsed.primaryCategory ?? "unknown",
-                        date: Self.announcementDate(from: parsed.updatedDate ?? parsed.submittedDate ?? Date()),
-                        isUpdate: parsed.submittedDate != parsed.updatedDate,
-                        isCrosslist: false
-                    )
-                    modelContext.insert(paper)
-                    result.append(paper)
-                }
-            }
-
-            try modelContext.save()
-        } catch {
-            #if DEBUG
-            print("⚠️ Failed to store author papers: \(error)")
-            #endif
+        for parsed in fetched.values {
+            guard let url = parsed.url else { continue }
+            guard parsed.authors.contains(where: { AuthorName.parse($0).map { target.matches($0) } ?? false }) else { continue }
+            let key = arxivDedupKey(for: url)
+            if byKey[key] == nil { byKey[key] = PaperCard(parsed: parsed) }
         }
 
-        return result.sorted { $0.date > $1.date }
+        return byKey.values.sorted { ($0.sortDate) > ($1.sortDate) }
     }
 
+    // Carries per-category outcome counts plus the dominant failure, so the
+    // sync service can report honestly instead of collapsing everything to a
+    // single Bool. `succeededCategories` is the *set* of categories that fetched
+    // cleanly (not just a count) so the service can record per-category sync
+    // timestamps for cheap partial retries.
     struct SyncResult {
         let added: Int
-        let failed: Bool
+        let succeededCategories: Set<String>
+        let totalCategories: Int
+        let dominantFailure: SyncFailure?
     }
 
+    // Primary entry point. `fetchCategories` is the set to actually hit the
+    // network for (auto-sync may pass only the stale ones); `selectedCategories`
+    // is the user's full selection, used for pruning and cross-list derivation
+    // so skipping a fresh category can't cause its papers to be pruned away.
     @discardableResult
     func syncPapers(
-        for categories: [String],
-        trackedCategories: [String]? = nil,
-        maxResultsPerCategory: Int = 500,
-        lookbackDays: Int = 30
+        fetchCategories: [String],
+        selectedCategories: [String],
+        maxResultsPerCategory: Int = 200,
+        lookbackDays: Int = 30,
+        onProgress: (@Sendable (_ done: Int, _ total: Int) -> Void)? = nil
     ) async -> SyncResult {
-        let tracked = Set((trackedCategories ?? categories).map { $0.lowercased() })
+        let tracked = Set(selectedCategories.map { $0.lowercased() })
 
         do {
             try prunePapersNotMatchingSelectedCategories(
-                selectedCategories: Set(categories.map { $0.lowercased() }),
+                selectedCategories: Set(selectedCategories.map { $0.lowercased() }),
                 keepSaved: true
             )
         } catch {
@@ -488,19 +929,39 @@ final class NetworkManager {
         }
 
         let fetched = await ArxivFetcher.fetchAll(
-            categories: categories,
+            categories: fetchCategories,
             maxPerCategory: maxResultsPerCategory,
-            lookbackDays: lookbackDays
+            lookbackDays: lookbackDays,
+            onProgress: onProgress
         )
 
-        // If no category produced a successful HTTP response, treat as failed
-        // so callers don't silently report "Up to date" after a network outage.
-        guard fetched.anySucceeded else {
-            return SyncResult(added: 0, failed: true)
-        }
+        // A failed category contributes nothing but never blanks the day: only
+        // the successfully-fetched papers reach storage sync.
+        let added = synchronizeWithStorage(fetched.mergedPapers, trackedCategories: tracked, lookbackDays: lookbackDays)
 
-        let added = synchronizeWithStorage(fetched.papers, trackedCategories: tracked, lookbackDays: lookbackDays)
-        return SyncResult(added: added, failed: false)
+        return SyncResult(
+            added: added,
+            succeededCategories: fetched.succeededCategories,
+            totalCategories: fetchCategories.count,
+            dominantFailure: fetched.dominantFailure
+        )
+    }
+
+    // Backward-compatible convenience for callers that fetch their full
+    // selection in one shot (Onboarding, Settings apply).
+    @discardableResult
+    func syncPapers(
+        for categories: [String],
+        trackedCategories: [String]? = nil,
+        maxResultsPerCategory: Int = 200,
+        lookbackDays: Int = 30
+    ) async -> SyncResult {
+        await syncPapers(
+            fetchCategories: categories,
+            selectedCategories: trackedCategories ?? categories,
+            maxResultsPerCategory: maxResultsPerCategory,
+            lookbackDays: lookbackDays
+        )
     }
 
     // MARK: - Next announcement time (Mon-Fri 20:00 ET)
@@ -595,19 +1056,30 @@ final class NetworkManager {
                                          uniquingKeysWith: { first, _ in first })
 
             for parsed in fetchedPapers.values {
-                guard let url = parsed.url, let updatedDate = parsed.updatedDate else { continue }
+                guard let url = parsed.url else { continue }
                 let key = arxivDedupKey(for: url)
 
-                if updatedDate < cutoff, storedByKey[key]?.saved != true {
+                // Listing day: RSS states it (pubDate); the Atom path derives it
+                // from the last-updated timestamp. A paper with neither is unusable.
+                let listing: Date
+                if let l = parsed.listingDate {
+                    listing = l
+                } else if let u = parsed.updatedDate {
+                    listing = Self.announcementDate(from: u)
+                } else {
+                    continue
+                }
+
+                if listing < cutoff, storedByKey[key]?.saved != true {
                     continue
                 }
 
                 if let existing = storedByKey[key] {
                     // A new version (…v2) keeps the same dedup key; point the
-                    // stored row at the newest URL and flag it as an update.
+                    // stored row at the newest URL.
                     if existing.url != url {
                         existing.url = url
-                        existing.isUpdate = true
+                        if parsed.rssIsUpdate == nil { existing.isUpdate = true }
                     }
                     existing.categories = Array(Set(existing.categories + Array(parsed.categories)))
 
@@ -616,19 +1088,38 @@ final class NetworkManager {
                         existing.primaryCategory = bp
                     }
 
-                    let primary = (parsed.primaryCategory ?? existing.primaryCategory).lowercased()
-                    if !primary.isEmpty && primary != "unknown" {
-                        existing.isCrosslist = !trackedCategories.contains(primary)
+                    // Prefer arXiv's own classification. It's authoritative and
+                    // monotonic — a native (non-cross) sighting in any feed
+                    // permanently wins — so we never recompute from the mutable
+                    // tracked-category set (which reclassified saved papers on
+                    // category edits). The Atom path keeps the legacy derivation.
+                    if let rssCross = parsed.rssIsCrosslist {
+                        existing.isCrosslist = existing.isCrosslist && rssCross
+                    } else {
+                        let primary = (parsed.primaryCategory ?? existing.primaryCategory).lowercased()
+                        if !primary.isEmpty && primary != "unknown" {
+                            existing.isCrosslist = !trackedCategories.contains(primary)
+                        }
+                    }
+                    if let rssUpdate = parsed.rssIsUpdate {
+                        existing.isUpdate = existing.isUpdate || rssUpdate
                     }
 
-                    // Recompute unconditionally: announcementDate is a pure function
-                    // of updatedDate, so this is idempotent — and it re-buckets rows
-                    // stored under the old ET-midnight convention onto the correct
-                    // local day after a timezone-related fix or move.
-                    existing.date = Self.announcementDate(from: updatedDate)
+                    // Idempotent re-bucketing onto the correct local listing day
+                    // (also repairs rows stored under the old ET-midnight convention).
+                    existing.date = listing
+
+                    // Backfill bibliographic extras as the feed provides them.
+                    if let s = parsed.submittedDate { existing.submittedDate = s }
+                    if let c = parsed.comment { existing.comment = c }
+                    if let j = parsed.journalRef { existing.journalRef = j }
+                    if let d = parsed.doi { existing.doi = d }
                 } else {
-                    let primary = (parsed.primaryCategory ?? "").lowercased()
-                    let isCrosslist = !primary.isEmpty && !trackedCategories.contains(primary)
+                    let isCrosslist = parsed.rssIsCrosslist ?? {
+                        let primary = (parsed.primaryCategory ?? "").lowercased()
+                        return !primary.isEmpty && !trackedCategories.contains(primary)
+                    }()
+                    let isUpdate = parsed.rssIsUpdate ?? (parsed.submittedDate != parsed.updatedDate)
 
                     let paper = Paper(
                         title: parsed.title,
@@ -637,9 +1128,13 @@ final class NetworkManager {
                         url: url,
                         categories: Array(parsed.categories),
                         primaryCategory: parsed.primaryCategory ?? "unknown",
-                        date: Self.announcementDate(from: updatedDate),
-                        isUpdate: parsed.submittedDate != parsed.updatedDate,
-                        isCrosslist: isCrosslist
+                        date: listing,
+                        isUpdate: isUpdate,
+                        isCrosslist: isCrosslist,
+                        submittedDate: parsed.submittedDate,
+                        comment: parsed.comment,
+                        journalRef: parsed.journalRef,
+                        doi: parsed.doi
                     )
 
                     modelContext.insert(paper)
@@ -707,5 +1202,68 @@ final class NetworkManager {
             next = calendar.date(byAdding: .day, value: 1, to: next)!
         }
         return next
+    }
+}
+
+// MARK: - NotificationManager
+
+// Local-notification helper. Authorization is requested only when the user opts
+// in (never at launch), and every entry point degrades quietly when denied.
+@MainActor
+enum NotificationManager {
+    static let dailySummaryID = "kiwi.dailySummary"
+
+    @discardableResult
+    static func requestAuthorization() async -> Bool {
+        do {
+            return try await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound, .badge])
+        } catch {
+            return false
+        }
+    }
+
+    static func isAuthorized() async -> Bool {
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        return status == .authorized || status == .provisional
+    }
+
+    // (Re)schedules a one-shot summary at the next announcement instant. We re-arm
+    // on launch/foreground rather than using a calendar-repeat trigger because
+    // "weekdays at 20:00 ET" doesn't express cleanly across the device timezone
+    // and DST.
+    static func scheduleDailySummary() async {
+        guard await isAuthorized() else { return }
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [dailySummaryID])
+
+        let content = UNMutableNotificationContent()
+        content.title = "New arXiv papers"
+        content.body = "Today's listing is out — open Kiwi to see what's new."
+        content.sound = .default
+
+        let interval = max(60, NetworkManager.nextAnnouncement().timeIntervalSinceNow)
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+        try? await center.add(UNNotificationRequest(identifier: dailySummaryID, content: content, trigger: trigger))
+    }
+
+    // Posted from a background sync when new keyword matches are found.
+    static func postKeywordMatch(topTitle: String, count: Int) async {
+        guard await isAuthorized() else { return }
+        let content = UNMutableNotificationContent()
+        content.title = count > 1 ? "\(count) new papers match your keywords"
+                                  : "New paper matches your keywords"
+        content.body = topTitle
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "kiwi.keywords.\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        try? await UNUserNotificationCenter.current().add(request)
+    }
+
+    static func cancelAll() {
+        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
     }
 }

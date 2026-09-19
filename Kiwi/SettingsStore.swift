@@ -2,21 +2,46 @@ import Foundation
 import SwiftData
 import SwiftUI
 import Combine
+import UIKit
 
 @MainActor
 final class SettingsStore: ObservableObject {
     
+    enum Appearance: String, CaseIterable, Identifiable {
+        case system, light, dark
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .system: return "System"
+            case .light: return "Light"
+            case .dark: return "Dark"
+            }
+        }
+    }
+
     var hapticsDisabled: Bool { settings.hapticsDisabled }
-    var darkModeEnabled: Bool { settings.darkModeEnabled }
+
+    var appearance: Appearance {
+        Appearance(rawValue: settings.appearancePreference) ?? .system
+    }
+
+    // nil lets the app follow the OS (System); otherwise force the scheme.
+    var preferredColorScheme: ColorScheme? {
+        switch appearance {
+        case .system: return nil
+        case .light:  return .light
+        case .dark:   return .dark
+        }
+    }
 
     func setHapticsDisabled(_ disabled: Bool) {
         settings.hapticsDisabled = disabled
         persist("setHapticsDisabled")
     }
 
-    func setDarkModeEnabled(_ enabled: Bool) {
-        settings.darkModeEnabled = enabled
-        persist("setDarkModeEnabled")
+    func setAppearance(_ appearance: Appearance) {
+        settings.appearancePreference = appearance.rawValue
+        persist("setAppearance")
     }
 
     @Published private(set) var settings: UserSettings
@@ -165,6 +190,104 @@ extension SettingsStore {
             .filter { !$0.isEmpty }
         ))
         .sorted()
+    }
+}
+
+// Central haptics gate. Every call site routes through here so the "Haptics"
+// preference actually silences the whole app — previously only SettingsView and
+// OnboardingView respected it and every other generator fired unconditionally.
+@MainActor
+enum Haptics {
+    static func impact(
+        _ style: UIImpactFeedbackGenerator.FeedbackStyle,
+        intensity: CGFloat = 1.0,
+        store: SettingsStore
+    ) {
+        guard !store.hapticsDisabled else { return }
+        let generator = UIImpactFeedbackGenerator(style: style)
+        generator.impactOccurred(intensity: intensity)
+    }
+
+    static func notification(
+        _ type: UINotificationFeedbackGenerator.FeedbackType,
+        store: SettingsStore
+    ) {
+        guard !store.hapticsDisabled else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(type)
+    }
+}
+
+extension SettingsStore {
+    var followedAuthors: [String] { settings.followedAuthors }
+
+    // Author-aware membership: "Manley, B." counts as following "Brandon Manley".
+    func isFollowing(_ name: String) -> Bool {
+        guard let target = AuthorName.parse(name) else {
+            return settings.followedAuthors.contains(name)
+        }
+        return settings.followedAuthors.contains { stored in
+            AuthorName.parse(stored).map { target.matches($0) } ?? (stored == name)
+        }
+    }
+
+    func follow(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isFollowing(trimmed) else { return }
+        settings.followedAuthors.append(trimmed)
+        persist("follow")
+    }
+
+    func unfollow(_ name: String) {
+        let target = AuthorName.parse(name)
+        settings.followedAuthors.removeAll { stored in
+            if let target, let parsed = AuthorName.parse(stored) { return target.matches(parsed) }
+            return stored == name
+        }
+        persist("unfollow")
+    }
+
+    func toggleFollow(_ name: String) {
+        if isFollowing(name) { unfollow(name) } else { follow(name) }
+    }
+
+    enum NotificationMode: String, CaseIterable, Identifiable {
+        case off, daily, keywords
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .off:      return "Off"
+            case .daily:    return "Daily summary"
+            case .keywords: return "Keyword matches"
+            }
+        }
+    }
+
+    var notificationMode: NotificationMode {
+        NotificationMode(rawValue: settings.notificationMode) ?? .off
+    }
+
+    func setNotificationMode(_ mode: NotificationMode) {
+        settings.notificationMode = mode.rawValue
+        persist("setNotificationMode")
+    }
+
+    var recentAuthorSearches: [String] { settings.recentAuthorSearches }
+
+    // Records a query most-recent-first, de-duplicated (case-insensitively) and
+    // capped so the list stays short.
+    func addRecentAuthorSearch(_ query: String, cap: Int = 8) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var list = settings.recentAuthorSearches.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
+        list.insert(trimmed, at: 0)
+        settings.recentAuthorSearches = Array(list.prefix(cap))
+        persist("addRecentAuthorSearch")
+    }
+
+    func clearRecentAuthorSearches() {
+        guard !settings.recentAuthorSearches.isEmpty else { return }
+        settings.recentAuthorSearches = []
+        persist("clearRecentAuthorSearches")
     }
 }
 
